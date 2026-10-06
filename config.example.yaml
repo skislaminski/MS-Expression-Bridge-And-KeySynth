@@ -1,0 +1,33 @@
+# Zoom MS-60B+ Expression Bridge
+# Copy this file to config.yaml and fill in the values (see README.md, "First-time setup").
+
+ports:                            # substring of the port name, must be unique (`python probe.py ports`)
+  zoom: "ZOOM MS Plus Series"
+  chocolate: ""                   # your MIDI controller, e.g. "SINCO" for the M-Vave Chocolate Plus
+
+zoom:
+  device_id: null                 # e.g. 0x6E, from `python probe.py identity`
+  firmware: null
+
+expression:                       # from `python probe.py cc`
+  cc: null
+  channel: null                   # 1–16
+  min: 0
+  max: 127
+  invert: false
+
+bridge:
+  min_interval_ms: 10             # minimum time between two parameter messages
+  deadband: 0                     # CC steps ignored as jitter
+  passthrough: false              # pass the controller's program change and bank select (CC 0/32) through
+
+ui:
+  port: 8765                      # interface: http://127.0.0.1:8765
+
+# Up to four parameters per preset. This section is written by the interface and must stay at
+# the end of the file. Key "bank/program", as the pedal reports the preset:
+# bank = (display - 1) // 10, program = (display - 1) % 10 (measured on preset 095 = "9/4").
+# slot = effect number - 1, param = parameter number + 1. min/max may narrow a learned range
+# (measurements.json) but not leave it. invert: true = heel max, toe min.
+# curve: linear, log (changes early) or exp (changes late).
+mappings: {}
