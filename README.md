@@ -1,13 +1,19 @@
 # Expression Bridge for the Zoom MS-60B+
 
-Control effect parameters of a **Zoom MS-60B+** with an expression pedal, in real time.
+Control a **Zoom MS-60B+** from MIDI controllers, in real time:
+
+- an **expression pedal** moves effect parameters, and
+- a **MIDI keyboard** plays [KeySynth](keysynth/README.md), a synth voice that runs on the pedal
+  as a custom effect (optional, the effect is included).
 
 The MS-60B+ officially accepts only patch changes over USB MIDI. Parameter changes need
 unofficial SysEx messages, which a plain MIDI controller cannot send. This program sits in
-between: it receives the controller's CC messages and translates them into the pedal's SysEx.
+between: it receives the controllers' messages and translates them into the pedal's SysEx.
 
 ```
-expression pedal → MIDI controller (sends CC) → this bridge (computer, USB host) → MS-60B+
+expression pedal → MIDI controller (sends CC) ─┐
+                                               ├→ this bridge (computer, USB host) → MS-60B+
+MIDI keyboard (notes, wheels, knobs) ──────────┘
 ```
 
 > **Unofficial and at your own risk.** The SysEx protocol was reverse engineered and is not
@@ -20,6 +26,7 @@ Developed and tested with exactly this setup:
 
 - Zoom MS-60B+, firmware 1.20
 - M-Vave Chocolate Plus (USB mode) with an expression pedal on its TRS input
+- Native Instruments Komplete Kontrol A61 as the keyboard, with KeySynth 0.21 on the pedal
 - macOS on Apple Silicon, Python 3.9
 
 Not tested: other MS Plus pedals (MS-50G+, MS-70CDR+, MS-200D+), other firmware versions,
@@ -30,10 +37,13 @@ See [Installation](#installation) for all three systems.
 
 - Browser interface on `http://127.0.0.1:8765`: live status, assignments, export and import
 - Up to four parameters per preset, each with its own range, direction (inverted or not) and curve
-- Assign any of effect 1–6 / parameter 1–9 directly, or let the pedal report a knob's exact
+- Assign any of effect 1–6 / parameter 1–12 directly, or let the pedal report a knob's exact
   range ("Learn parameter")
 - Follows preset changes on the pedal; presets without an assignment are left alone
 - Waits for missing devices and reconnects after replugging (tested with the controller)
+- Optional: a MIDI keyboard plays the custom effect KeySynth on the pedal, with pitch wheel,
+  and with any wheel, knob or slider of the keyboard assigned to the synth's knobs by
+  "Learn", see [Keyboard synth](#keyboard-synth)
 - Sends only message kinds you have approved, and logs every SysEx message sent and received
 
 ## Before you start
@@ -146,7 +156,8 @@ values go into `config.yaml`, a plain text file you can edit with any text edito
 
    Enter the reported `device_id` and `firmware` in `config.yaml`.
 
-3. Measure the expression pedal. This sends nothing to the MS-60B+.
+3. Measure the expression pedal. This sends nothing to the MS-60B+. (Only a keyboard, no
+   expression controller? Leave `chocolate:` under `ports:` empty and skip this step.)
 
    ```bash
    .venv/bin/python probe.py cc
@@ -165,12 +176,20 @@ values go into `config.yaml`, a plain text file you can edit with any text edito
 
 | System | Double-click | Or in the terminal |
 |---|---|---|
-| macOS | `Start Bridge.command` | `.venv/bin/python bridge.py --open` |
+| macOS | `Start Bridge.command`, afterwards the app it makes | `.venv/bin/python bridge.py --open` |
 | Windows | `Start Bridge.bat` | `.venv\Scripts\python bridge.py --open` |
 | Linux | – | `.venv/bin/python bridge.py --open` |
 
 The interface opens in the browser at `http://127.0.0.1:8765`. If a device is missing, the
 bridge waits for it and connects as soon as it appears.
+
+**A clickable icon.** On macOS the first start with `Start Bridge.command` makes
+`Expression Bridge.app` in the same folder: an app with its own icon that opens that script in
+a Terminal window and nothing more. Double-click it from then on, or drag it into the Dock. It
+is made on your computer because macOS blocks unsigned apps that come out of a download; if you
+move the folder, start once with `Start Bridge.command` again and the app is made afresh. On
+Windows, make a shortcut to `Start Bridge.bat` and give it `icon.ico` (Properties → Change
+Icon).
 
 Stop the bridge with **Ctrl+C** in its window: it then switches the pedal's edit mode off and
 closes the MIDI ports. Closing the window on Windows ends it without that step, which had no
@@ -178,8 +197,11 @@ lasting effect in testing on macOS.
 
 ## Using the interface
 
+At the top is the keyboard synth (only when it is set up, see [Keyboard synth](#keyboard-synth)),
+below it everything about the expression pedal:
+
 - **Add preset**: enter the preset number shown on the pedal and click "Add preset".
-- **Parameter**: choose effect 1–6 (position in the chain) and parameter 1–9 (order on the pedal).
+- **Parameter**: choose effect 1–6 (position in the chain) and parameter 1–12 (order on the pedal).
 - **Heel / Toe**: the parameter's value at each end of the pedal's travel. Use them to limit
   the range (20 to 70) or to invert the direction (100 to 0). "Invert" swaps the two.
 - **Curve**: linear, or changing early or late in the pedal's travel.
@@ -188,6 +210,45 @@ lasting effect in testing on macOS.
   parameter and its exact range.
 - **Export / Import**: all presets or a single one as a JSON file, including learned ranges.
 
+
+## Keyboard synth
+
+Optional, and only useful with the custom effect **KeySynth** (version 0.21 or later) installed
+on the pedal: a two-oscillator synth voice whose first knob, "Key", is gate and pitch in one
+number (0 = off, n = 10-cent steps above C0). The effect, its source and how to install it are
+in [`keysynth/`](keysynth/README.md); **read the warnings there first**, a custom effect can
+make a pedal unusable. With the `synth:` section filled in in `config.yaml`, a MIDI keyboard
+plays that effect:
+
+- Monophonic, last note wins; releasing it returns to a note that is still held. Note on with
+  velocity 0 counts as note off, the sustain pedal (CC 64) holds notes, "all notes off" and
+  stopping the bridge close the gate. The effect plays MIDI notes 12–111 (C0 to D#8).
+- **Pitch wheel:** bends the sounding note, ±2 semitones unless `bend_range` says otherwise.
+  Note and bend travel as one value, so a note always arrives with its pitch. While a note
+  sounds the wheel is followed in steps of at most 90 cents per message; the effect smooths
+  them.
+- **Any other control of the keyboard** (mod wheel, knobs, sliders) can set one of the effect's
+  other knobs. In the interface, under "Keyboard synth", click "Learn" next to a knob and move
+  the control you want; "Clear" removes it. It works with any keyboard and any controller
+  number, as long as the control sends absolute values 0–127 (endless encoders in relative
+  mode do not). One control sets one knob. Nothing is assigned until you do it, not even the
+  mod wheel. The assignments are kept in `controls.json`.
+- **LFO depth from a wheel:** the effect's LFO knob is kind and depth in one (Vib50 … Vib1, Off,
+  Trm1 … Trm50), so a control assigned to "LFO" has Off in the middle of its travel. "Vib" and
+  "Trm" in the same list are the two halves of that knob: with the control at rest the LFO is
+  off, at full travel the vibrato or tremolo is deepest, as with the mod wheel of a hardware
+  synth.
+- The bridge finds the effect itself: it asks the pedal for the current patch when it starts,
+  after every preset change, and while a key is held and the effect is not there yet (once
+  per second). No effect in the preset: the keyboard is ignored.
+- Notes are sent at once, never spaced or merged; expression values wait their turn.
+- The keyboard and the expression controller are both optional then: the bridge starts with
+  either one, and the other may be plugged in or pulled while it runs.
+- It needs one more approval, for the patch query:
+  `.venv/bin/python probe.py approve query_patch`
+
+Each confirmed note is printed with the time from key press to the pedal's acknowledgement
+(bend steps are not, they would flood the terminal).
 
 ## Safety
 
@@ -203,6 +264,11 @@ lasting effect in testing on macOS.
 - **Parameters that were not learned** are sent with the range you enter. Until the pedal has
   confirmed such a parameter once, it gets one message at a time; after five unconfirmed
   messages the bridge stops sending to it and the interface says so.
+- **The keyboard synth writes the KeySynth's knobs only.** Notes and bends are built with the
+  parameter fixed to the effect's Key knob (0–1000); a controller writes the knob it was
+  assigned to, within that knob's own range. All of it passes the allowlist only while the
+  pedal's own patch dump shows the effect in that slot. An expression assignment that points
+  at the Key knob, or whose range is wider than the knob it points at, is not sent.
 - **Not tested:** what the pedal does with an effect or parameter number that does not exist
   in the preset. The reference documentation mentions a related system command whose invalid
   values freeze the pedal, so the firmware does not validate everything.
@@ -219,6 +285,7 @@ written for the MS-50G+. These points were confirmed on the MS-60B+; all bytes a
 | Parameter edit enable / disable | `F0 52 00 6E 50 F7` / `… 51 F7` | Ack `F0 52 00 6E 00 00 F7` |
 | Set parameter | `F0 52 00 6E 64 20 00 <slot> <param> <LSB> <MSB> 00 00 00 F7` | Ack `… 64 20 01 <slot> <param> <LSB> <MSB> …` after about 4–11 ms, **only if the value changed** |
 | Query current program | `F0 52 00 6E 33 F7` | CC 0, CC 32, program change; also answered without edit enable |
+| Query current patch | `F0 52 00 6E 64 13 F7` | Reply `… 64 12 01 <length LSB MSB> <patch, 7-bit packed> <CRC32, 5 bytes> F7`, 985 bytes in all for an 848-byte patch |
 
 - Slots count from 0 (first effect in the chain), parameters from 2 (first knob). Per the
   zoom-explorer source, parameter 0 is effect on/off and 1 is the effect type; the bridge
@@ -227,11 +294,34 @@ written for the MS-50G+. These points were confirmed on the MS-60B+; all bytes a
 - On a preset change the pedal sends `64 26 00 00 <bank LSB MSB> <program LSB MSB>`, then
   `64 20 00 64 02 …` (tempo, per the reference), then CC 0, CC 32 and a program change.
 - The number shown on the pedal is `bank × 10 + program + 1` (preset 095 = bank 9, program 4).
-- Values up to 100 were verified, where the value sits in the LSB. The 7-bit split for values
-  above 127 follows the reference and was only exercised in simulation.
+- The value is split into 7-bit groups, lowest first. Verified up to 451 (with the KeySynth's
+  Key knob); values up to 127 sit in the LSB alone.
 - The very first "set parameter" after connecting was once applied without an ack.
+- The patch ("PTCF") lists the effect ids in chain order from offset 36, the effect count is at
+  offset 12; the pedal has 6 effect slots. Read with zoom-zt2's `decode_preset.py` layout.
+- 128 "set parameter" messages 26.8 ms apart were all acknowledged (measured with the
+  KeySynth's Key knob); the ack came after 1–10 ms. In a 71-minute run, 67,200 messages
+  (about 16 per second) were all acknowledged.
+- Of two messages 1 ms apart the pedal acknowledges only the second. While its own knobs are
+  turned or its menus are open, it answers late or not at all for 0.1 to 0.7 s.
 - The Chocolate Plus sends about 30 CC messages per second. The bridge sends at most one
   SysEx per 10 ms, so with four parameters each one is updated about 25 times per second.
+
+## Tests
+
+The tests run the bridge, its interface and the setup script against a simulated pedal and
+controller. They open no real MIDI port and need no hardware.
+
+```bash
+.venv/bin/python -m unittest
+```
+
+Run them after every change. They cover the allowlist, throttling, preset changes, replugging,
+learning, saving, export and import, how parameters that were not learned are handled, and
+the keyboard synth (with one real patch dump of the pedal as a fixture). They take about two
+minutes.
+What they cannot tell you is how a real pedal reacts, so check changes to the messages on
+hardware as well.
 
 ## Files
 
@@ -242,18 +332,26 @@ written for the MS-50G+. These points were confirmed on the MS-60B+; all bytes a
 | `zoom_sysex.py` | SysEx builders, allowlist, parsers, approvals, learned ranges |
 | `probe.py` | Setup and exploration: ports, identity, CC measurement, learn, verify, approvals |
 | `config.example.yaml` | Template for `config.yaml` |
-| `Start Bridge.command` | macOS launcher: sets up the environment if needed and starts the bridge |
-| `Start Bridge.bat` | The same for Windows (untested) |
+| `tests/` | Tests against simulated devices (`sim.py` is the simulated pedal and controller) |
+| `Start Bridge.command` | macOS launcher: sets up the environment if needed, makes the clickable app and starts the bridge |
+| `Start Bridge.bat` | The same for Windows, without the app (untested) |
+| `icon.png`, `icon.ico` | The icon of the app, and the same for a Windows shortcut |
+| `keysynth/` | The KeySynth effect for the pedal: ready-made file, source, tests, install notes |
 | `Prepare GitHub upload.command` | macOS helper for maintainers: collects the publishable files in `github-upload/` |
 | `NOTES.md`, `CLAUDE.md` | Development notes and the original project brief (German) |
 
 Created locally and not part of the repository: `config.yaml`, `approvals.json`,
-`measurements.json`, `logs/sysex.log`.
+`measurements.json`, `controls.json`, `logs/sysex.log`, `Expression Bridge.app`.
 
 ## Credits
 
 - [zoom-explorer](https://github.com/thammer/zoom-explorer) by thammer, for documenting the
   MS Plus SysEx protocol
+- [stomphacks](https://github.com/thammer/stomphacks) by thammer, the toolchain KeySynth is built
+  and installed with, and [zoom-zt2](https://github.com/mungewell/zoom-zt2) by mungewell
+- [SYNTHESIS SYNx2](https://github.com/Leemuzhko/Zoom-ZDL-FX/blob/main/zdl/sfx/synthesis/README.md)
+  by Leemuzhko, a synth effect for the older Zoom MS pedals and the model for KeySynth's set of
+  features (the idea only; none of its code is used)
 - [mido](https://github.com/mido/mido) and [python-rtmidi](https://github.com/SpotlightKid/python-rtmidi)
 
 ## License

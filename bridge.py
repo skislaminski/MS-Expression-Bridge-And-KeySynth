@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Expression Bridge: CC from the Chocolate Plus → parameter SysEx to the MS-60B+, with a web UI.
+Optionally a MIDI keyboard plays the KeySynth effect on the pedal (section `synth:` in config.yaml):
+notes and pitch wheel become its Key knob, the mod wheel and any other controller can be assigned
+to its other knobs (learned in the interface, kept in controls.json).
 
   python bridge.py           bridge + interface in the browser (the address is printed on start)
   python bridge.py --open    also opens the interface in the browser
@@ -12,6 +15,7 @@ learning.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import queue
 import signal
@@ -34,6 +38,7 @@ ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "config.yaml"
 APPROVALS = ROOT / "approvals.json"
 MEASUREMENTS = ROOT / "measurements.json"
+CONTROLS = ROOT / "controls.json"
 
 REQUIRED_KINDS = ("identity_request", "edit_enable", "edit_disable", "set_param", "query_program")
 IGNORED_TYPES = ("clock", "active_sensing")
@@ -48,12 +53,22 @@ ACKS_BEFORE_SPEEDUP = 200
 MAX_INTERVAL = 0.1         # never throttle slower than 100 ms
 PATCHES_PER_BANK = 10      # measured: display 095 = bank 9, program 4
 MAX_TARGETS = 4            # how many parameters the expression pedal controls per preset at most
-MAX_EFFECTS = 6            # effects 1–6 and parameters 1–9 can be assigned without learning them
-MAX_PARAMS = 9
+MAX_EFFECTS = 6            # effects 1–6 and parameters 1–12 can be assigned without learning them
+MAX_PARAMS = 12
 UNLEARNED_MAX = 0x3FFF     # value limit for a parameter whose range has not been learned
 UNCONFIRMED_HINT = 3       # misses in a row before the interface flags a parameter
 UNCONFIRMED_LIMIT = 5      # misses before sending stops for a parameter the pedal never confirmed
 EXPORT_FORMAT = "expression-bridge/1"
+SYNTH_QUERY_SECONDS = 1.0  # while looking for the KeySynth effect: at most one patch query per second
+KEY_MISSES_BEFORE_QUERY = 3  # unconfirmed notes before the bridge looks where the effect is now
+KEY_ACK_TIMEOUT = 0.06     # a note is confirmed after about 10 ms (slowest seen: 20 ms)
+KEY_RETRIES = 3            # how often the last note or the gate-off is repeated while unconfirmed
+KEY_TROUBLE_SECONDS = 5.0  # while notes stay unconfirmed: warn and look for the effect this often at most
+EDIT_REENABLE_SECONDS = 2.0  # while nothing is confirmed: switch edit mode on again this often at most
+NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+MAX_BEND_RANGE = 12        # semitones the pitch wheel may be set to bend each way
+# Controllers that cannot be assigned to a knob: bank select, sustain, the channel mode messages
+RESERVED_CONTROLS = (0, 32, 64) + tuple(range(120, 128))
 
 CURVES = {
     "linear": lambda x: x,
@@ -91,6 +106,94 @@ def parse_key(key) -> tuple[int, int]:
 def display(patch: tuple[int, int]) -> str:
     """The number under which the pedal shows the patch."""
     return f"{patch[0] * PATCHES_PER_BANK + patch[1] + 1:03d}"
+
+
+def note_name(note: int) -> str:
+    return f"{NOTE_NAMES[note % 12]}{note // 12 - 1}"
+
+
+def read_synth(cfg: dict) -> Optional[dict]:
+    """The optional `synth:` section of config.yaml, checked. None: no keyboard synth set up."""
+    section = cfg.get("synth")
+    if not section or not section.get("keyboard"):
+        return None
+    unknown = set(section) - {"keyboard", "channel", "effect_id", "low_note", "high_note", "sustain",
+                              "bend_range"}
+    if unknown:
+        sys.exit(f"config.yaml, synth: unknown setting {', '.join(sorted(unknown))}")
+    try:
+        synth = {"keyboard": str(section["keyboard"]), "channel": int(section.get("channel", 0)),
+                 "effect_id": int(section["effect_id"]), "low_note": int(section.get("low_note", 0)),
+                 "high_note": int(section.get("high_note", 127)), "sustain": bool(section.get("sustain", True)),
+                 "bend_range": float(section.get("bend_range", 2))}
+    except (KeyError, TypeError, ValueError):
+        sys.exit("config.yaml, synth: effect_id is missing or a value is not a number.")
+    if not (0 <= synth["channel"] <= 16 and 0 < synth["effect_id"] <= 0xFFFFFFFF
+            and 0 <= synth["low_note"] <= synth["high_note"] <= 127
+            and 0 <= synth["bend_range"] <= MAX_BEND_RANGE):
+        sys.exit("config.yaml, synth: channel must be 0–16 (0 = any), notes 0–127 with "
+                 f"low_note ≤ high_note, bend_range 0–{MAX_BEND_RANGE} semitones, effect_id the id "
+                 "of the KeySynth effect.")
+    # The effect's Key knob reaches C0 to D#8; notes outside that are not played.
+    synth["low_note"] = max(synth["low_note"], zs.KEY_LOW_NOTE)
+    synth["high_note"] = min(synth["high_note"], zs.KEY_HIGH_NOTE)
+    return synth
+
+
+def read_controls(path: Path) -> dict:
+    """Which controller of the keyboard sets what on the KeySynth: {name in zs.SYNTH_CONTROLS: CC number}.
+    No file yet: nothing is assigned. Anything in the file that cannot be right is dropped."""
+    if not path.exists():
+        return {}
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8")).get("controls", {})
+    except (OSError, ValueError, AttributeError):
+        sys.exit(f"{path.name} is damaged – delete it to start again without assignments.")
+    controls: dict = {}
+    for name, number in stored.items() if isinstance(stored, dict) else ():
+        if (name in zs.SYNTH_CONTROLS and isinstance(number, int) and not isinstance(number, bool)
+                and 0 <= number <= 127 and number not in RESERVED_CONTROLS
+                and number not in controls.values()):
+            controls[name] = number
+    return controls
+
+
+class Keys:
+    """Which note a monophonic synth should sound: the last one pressed wins, and when it is
+    released the one pressed before it comes back if it is still down."""
+
+    def __init__(self, sustain_enabled: bool = True):
+        self.sustain_enabled = sustain_enabled
+        self.held: list = []          # notes that are down, oldest first
+        self.sustained: list = []     # notes released while the sustain pedal was down
+        self.pedal_down = False
+
+    def note_on(self, note: int) -> None:
+        self.note_off(note, sustain=False)
+        self.held.append(note)
+
+    def note_off(self, note: int, sustain: bool = True) -> None:
+        if note in self.sustained:
+            self.sustained.remove(note)
+        if note in self.held:
+            self.held.remove(note)
+            if sustain and self.pedal_down:
+                self.sustained.append(note)
+
+    def pedal(self, down: bool) -> None:
+        self.pedal_down = down and self.sustain_enabled
+        if not self.pedal_down:
+            self.sustained.clear()
+
+    def clear(self) -> None:
+        self.held.clear()
+        self.sustained.clear()
+
+    @property
+    def note(self) -> Optional[int]:
+        """The MIDI note that should sound, None for silence."""
+        notes = self.held or self.sustained
+        return notes[-1] if notes else None
 
 
 @dataclass(frozen=True)
@@ -131,6 +234,14 @@ class Sent(NamedTuple):
     retry: bool
 
 
+class KeySent(NamedTuple):
+    value: int
+    time: float       # arrival of the keyboard message that caused it
+    send_time: float
+    attempt: int      # 0 for the first try
+    bend: bool        # a step of the pitch wheel, not a note
+
+
 class Target:
     """An assigned parameter of the current preset and its send state."""
 
@@ -143,6 +254,8 @@ class Target:
         self.misses_in_row = 0
         self.confirmed = False                              # the pedal has acknowledged or reported it
         self.stopped = False                                # not learned and never confirmed: nothing more is sent
+        self.blocked = False                                # a KeySynth knob the expression pedal must not write
+        self.expression = True                              # False: only a keyboard controller sets it
 
 
 class Session:
@@ -150,13 +263,23 @@ class Session:
 
     def __init__(self, bridge: "Bridge"):
         cfg = bridge.cfg
+        self.synth = bridge.synth                           # None: no keyboard synth set up
         inputs, outputs = mido.get_input_names(), mido.get_output_names()
         self.zoom_in_name = zs.find_port(inputs, cfg["ports"]["zoom"])
         self.zoom_out_name = zs.find_port(outputs, cfg["ports"]["zoom"])
-        self.chocolate_name = zs.find_port(inputs, cfg["ports"]["chocolate"])
+        if self.synth is None:
+            self.chocolate_name = zs.find_port(inputs, cfg["ports"]["chocolate"])
+            self.keyboard_name = None
+        else:   # two controllers: either one is enough to start, the other may join later
+            self.chocolate_name = self._present(inputs, cfg["ports"]["chocolate"])
+            self.keyboard_name = self._present(inputs, self.synth["keyboard"])
+            if self.chocolate_name is None and self.keyboard_name is None:
+                raise zs.PortError("no controller connected (neither the expression controller "
+                                   f"nor the keyboard “{self.synth['keyboard']}”)")
         self.zoom_in = mido.open_input(self.zoom_in_name)
         self.zoom_out = mido.open_output(self.zoom_out_name)
-        self.chocolate = mido.open_input(self.chocolate_name)
+        self.chocolate = mido.open_input(self.chocolate_name) if self.chocolate_name else None
+        self.keyboard = mido.open_input(self.keyboard_name) if self.keyboard_name else None
 
         self.bridge = bridge
         self.device_id = cfg["zoom"]["device_id"]
@@ -183,6 +306,32 @@ class Session:
         self.next_report = self.next_port_check = 0.0
         self.query_at: Optional[float] = None               # when a patch query is due
 
+        # KeySynth: the keyboard writes the effect's Key knob
+        self.keys = Keys(self.synth["sustain"] if self.synth else True)
+        self.bend = 0.0                                     # semitones, from the pitch wheel
+        self.note_sent: Optional[int] = None                # the note the last Key value was for
+        self.controls: dict = {}                            # CC number → (Target, name in zs.SYNTH_CONTROLS)
+        self.told: set = set()                              # remarks made about the assignments of this preset
+        self.synth_slot: Optional[int] = None               # where the effect sits in the current preset
+        self.synth_known = False                            # a patch dump has told us whether it is there
+        self.key_sent: Optional[int] = None                 # the Key value the pedal holds, as far as we know
+        self.key_awaiting: deque = deque()                  # KeySent, ack outstanding
+        self.key_misses = 0
+        self.key_totals = {"sent": 0, "acked": 0, "missed": 0, "overtaken": 0}
+        self.key_latencies: deque = deque(maxlen=50)
+        self.patch_query_at: Optional[float] = None         # when to look for the effect (after a preset change)
+        self.last_patch_query = float("-inf")
+        self.last_key_trouble = float("-inf")
+        self.last_reenable = float("-inf")
+        self.can_query_patch = bridge.approvals.is_approved("query_patch")
+
+    @staticmethod
+    def _present(names, needle: str) -> Optional[str]:
+        """The port for an optional controller, or None while it is not connected."""
+        if not needle or not any(needle.lower() in name.lower() for name in names):
+            return None
+        return zs.find_port(names, needle)   # more than one match is still an error
+
     # --- Setup and teardown ---
 
     def start(self) -> None:
@@ -203,19 +352,33 @@ class Session:
         self._wait(lambda raw: None, 0.5)   # the reply (bank select + program change) is handled by _on_zoom
         if self.patch is None:
             say("Current preset unknown – expression is ignored until the pedal reports a preset.")
+        if self.synth is not None:
+            if not self.can_query_patch:
+                say("KeySynth: the patch query is not approved (`python probe.py approve query_patch`) "
+                    "– the keyboard is ignored")
+            else:
+                self.patch_query_at = None
+                self._look_for_synth(time.monotonic(), force=True)
+                self._wait(lambda raw: self.synth_known, 1.0)
         self.ready = True
-        say(f"Ready: {self.chocolate_name} → {self.zoom_out_name}, firmware {identity.version}")
+        controllers = " + ".join(name for name in (self.chocolate_name, self.keyboard_name) if name)
+        say(f"Ready: {controllers} → {self.zoom_out_name}, firmware {identity.version}")
 
     def close(self) -> None:
         try:
             if self.edit_enabled:
+                if self.synth_slot is not None and self.key_sent:   # never leave a note hanging
+                    self.keys.clear()
+                    self._send_key(0, time.monotonic())
+                    self._wait(lambda raw: not self.key_awaiting, 0.3)
                 self.sender.send(zs.build_edit_disable(self.device_id))
                 self._wait(lambda raw: zs.is_ack(zs.zoom_body(raw, self.device_id)), 0.5)
         except OSError:
             pass   # the device is already gone
         finally:
-            for port in (self.zoom_in, self.zoom_out, self.chocolate):
-                port.close()
+            for port in (self.zoom_in, self.zoom_out, self.chocolate, self.keyboard):
+                if port is not None:
+                    port.close()
 
     def _wait(self, match, timeout: float):
         """Processes incoming Zoom messages until match(raw) returns something truthy for a SysEx."""
@@ -232,8 +395,12 @@ class Session:
     # --- One pass of the main loop ---
 
     def step(self, now: float) -> None:
-        for message in self.chocolate.iter_pending():
-            self._on_chocolate(message, now)
+        if self.keyboard is not None:           # notes first: they are never delayed or merged
+            for message in self.keyboard.iter_pending():
+                self._on_keyboard(message, now)
+        if self.chocolate is not None:
+            for message in self.chocolate.iter_pending():
+                self._on_chocolate(message, now)
         for message in self.zoom_in.iter_pending():
             self._on_zoom(message, now)
         self._flush(now)
@@ -241,6 +408,11 @@ class Session:
         if self.query_at is not None and now >= self.query_at:
             self.query_at = None
             self.sender.send(zs.build_query_program(self.device_id))
+        if self.patch_query_at is not None and now >= self.patch_query_at:
+            self.patch_query_at = None
+            # Known to be absent: only keep looking while a key is down (the player is waiting for it).
+            if self.synth_slot is not None or not self.synth_known or self.keys.note is not None:
+                self._look_for_synth(now, force=True)
         self._report(now)
         if now >= self.next_port_check:
             self._check_ports()
@@ -248,10 +420,42 @@ class Session:
 
     def _check_ports(self) -> None:
         inputs, outputs = mido.get_input_names(), mido.get_output_names()
-        for name, names in ((self.zoom_in_name, inputs), (self.zoom_out_name, outputs),
-                            (self.chocolate_name, inputs)):
+        for name, names in ((self.zoom_in_name, inputs), (self.zoom_out_name, outputs)):
             if name not in names:
                 raise Disconnected(f"{name} is gone")
+        if self.synth is None:
+            if self.chocolate_name not in inputs:
+                raise Disconnected(f"{self.chocolate_name} is gone")
+            return
+        # Two controllers: one may leave or join while the other keeps working.
+        if self.chocolate_name is not None and self.chocolate_name not in inputs:
+            say(f"{self.chocolate_name} is gone")
+            self._drop("chocolate")
+        if self.keyboard_name is not None and self.keyboard_name not in inputs:
+            say(f"{self.keyboard_name} is gone")
+            self._drop("keyboard")
+            self.keys.clear()
+            self.bend = 0.0
+            self._play(time.monotonic())        # gate off
+        if self.chocolate_name is None and self.keyboard_name is None:
+            raise Disconnected("no controller left")
+        for attribute, needle in (("chocolate", self.bridge.cfg["ports"]["chocolate"]),
+                                  ("keyboard", self.synth["keyboard"])):
+            if getattr(self, attribute) is None:
+                name = self._present(inputs, needle)
+                if name is not None:
+                    setattr(self, attribute, mido.open_input(name))
+                    setattr(self, attribute + "_name", name)
+                    say(f"{name} connected")
+
+    def _drop(self, attribute: str) -> None:
+        port = getattr(self, attribute)
+        setattr(self, attribute, None)
+        setattr(self, attribute + "_name", None)
+        try:
+            port.close()
+        except OSError:
+            pass   # the device is already gone
 
     # --- Chocolate → target values ---
 
@@ -266,7 +470,7 @@ class Session:
                 if expression["invert"]:
                     position = 1.0 - position
                 for target in self.targets:
-                    if not target.stopped:
+                    if target.expression and not (target.stopped or target.blocked):
                         target.pending = (target.mapping.target(position), now)   # an older value is dropped
         elif self.passthrough and (message.type == "program_change" or (
                 message.type == "control_change" and message.control in (0, 32))):
@@ -277,6 +481,180 @@ class Session:
                 self.patch = None
                 self.refresh()
                 self.query_at = now + QUERY_DELAY
+
+    # --- Keyboard → the KeySynth's knobs ---
+
+    def _on_keyboard(self, message, now: float) -> None:
+        synth = self.synth
+        if message.type in IGNORED_TYPES or not hasattr(message, "channel"):
+            return
+        if synth["channel"] and message.channel + 1 != synth["channel"]:
+            return
+        if message.type in ("note_on", "note_off"):
+            if not synth["low_note"] <= message.note <= synth["high_note"]:
+                return
+            if message.type == "note_on" and message.velocity > 0:
+                self.keys.note_on(message.note)
+            else:                                   # note on with velocity 0 is a note off
+                self.keys.note_off(message.note)
+        elif message.type == "pitchwheel":
+            # Only remembered here: _bend_step walks the Key knob there, a few clicks at a time.
+            self.bend = message.pitch / 8192 * synth["bend_range"]
+            return
+        elif message.type == "control_change" and message.control == 64:
+            self.keys.pedal(message.value >= 64)
+        elif message.type == "control_change" and message.control in (120, 123):
+            self.keys.clear()                       # all sound off, all notes off
+        elif message.type == "control_change":
+            self._on_control(message.control, message.value, now)
+            return
+        else:
+            return
+        self._play(now)
+
+    def _on_control(self, number: int, value: int, now: float) -> None:
+        """A controller of the keyboard other than sustain: while the interface is learning it is
+        assigned to a knob, otherwise it sets the knob it is assigned to."""
+        if self.bridge.control_learning is not None:
+            self.bridge.learned_control(number)
+            return
+        target, name = self.controls.get(number, (None, None))
+        if target is not None and not (target.stopped or target.blocked):
+            target.pending = (zs.control_value(name, value), now)   # an older value is dropped
+
+    def _wanted_key(self) -> int:
+        """The Key value for the keys that are down and the pitch wheel; 0 = gate off."""
+        note = self.keys.note
+        return 0 if note is None else zs.key_for(note, self.bend)
+
+    def _play(self, now: float) -> None:
+        """Brings the pedal's Key knob in line with the keys that are down. A note goes out at
+        once: it is not spaced, delayed or merged, only an unchanged value is skipped."""
+        key, note = self._wanted_key(), self.keys.note
+        if self.synth_slot is None:
+            if key:                                 # the effect may have been added just now
+                self._look_for_synth(now)
+            return
+        if note is not None and note == self.note_sent and self.key_sent:
+            return                                  # the same note still sounds: _bend_step follows the wheel
+        if key != self.key_sent:
+            self._send_key(key, now)
+        self.note_sent = note
+
+    def _bend_step(self, now: float) -> bool:
+        """While a note sounds, moves the Key knob towards where the pitch wheel wants it, at most
+        KEY_BEND_STEP clicks per message. The effect takes a larger move for a new note and, with
+        Glide on, would slide to it instead of following the wheel."""
+        if self.synth_slot is None or not self.key_sent or self.keys.note != self.note_sent:
+            return False
+        wanted = self._wanted_key()
+        if not wanted or wanted == self.key_sent:
+            return False
+        step = max(-zs.KEY_BEND_STEP, min(zs.KEY_BEND_STEP, wanted - self.key_sent))
+        self._send_key(self.key_sent + step, now, bend=True)
+        return True
+
+    def _send_key(self, key: int, now: float, played: Optional[float] = None, attempt: int = 0,
+                  bend: bool = False) -> None:
+        self.sender.send(zs.build_set_key(self.device_id, self.synth_slot, key))
+        self.key_sent = key
+        self.last_send = time.monotonic()           # every other value keeps its distance from a note
+        self.key_awaiting.append(KeySent(key, now if played is None else played, now, attempt, bend))
+        self.key_totals["sent"] += 1
+
+    def _on_key_ack(self, value: int, now: float) -> None:
+        if all(sent.value != value for sent in self.key_awaiting):
+            return
+        while True:                                 # acks arrive in send order
+            sent = self.key_awaiting.popleft()
+            if sent.value == value:
+                break
+            # Seen on the real pedal: of two messages 1 ms apart (two keys almost together) only
+            # the second is confirmed. The first was replaced before it could matter.
+            zs.log.info("--  Key %d was overtaken by the next message", sent.value)
+            self.key_totals["overtaken"] += 1
+        self.key_misses = 0
+        self.key_totals["acked"] += 1
+        self.key_latencies.append(now - sent.time)
+        if sent.bend:
+            return                                  # a moving wheel would flood the terminal
+        if value:
+            note, cents = zs.key_pitch(value)
+            what = f"{note_name(note):>4} ({note:3d})" + (f" {cents:+d} c" if cents else "")
+        else:
+            what = "       off"
+        print(f"{time.strftime('%H:%M:%S')}  {what} → Key {value:4d}   ack {1000 * (now - sent.time):5.1f} ms",
+              flush=True)
+
+    def _key_miss(self, sent: KeySent, now: float) -> None:
+        """No ack for a note in time. Seen on the real pedal: while the player is in its effect
+        menu a message can get lost."""
+        zs.log.info("--  no ack for Key %d", sent.value)
+        if (not self.key_awaiting and sent.value == self.key_sent == self._wanted_key()
+                and sent.attempt < KEY_RETRIES):
+            # The last note, the end of a bend or the gate-off must not get lost. Repeating is
+            # harmless: the pedal ignores a value it already holds.
+            self._send_key(sent.value, now, played=sent.time, attempt=sent.attempt + 1, bend=sent.bend)
+        if sent.attempt:
+            return          # counted once, with the first try
+        self.key_totals["missed"] += 1
+        self.key_misses += 1
+        if self.key_misses >= KEY_MISSES_BEFORE_QUERY:
+            self.key_misses = 0
+            self._reenable_edit(now)
+            # Usually the player is turning a knob or browsing effects on the pedal, which keeps
+            # it from answering for a moment. Do not pile more work on it: ask where the effect
+            # is only now and then.
+            if now - self.last_key_trouble >= KEY_TROUBLE_SECONDS:
+                self.last_key_trouble = now
+                say("WARNING: the pedal does not confirm notes – switching edit mode on again and "
+                    "looking for the KeySynth effect")
+                self._look_for_synth(now)
+
+    def _reenable_edit(self, now: float) -> None:
+        """Parameters that stay unconfirmed can mean the pedal has left edit mode. Seen on the
+        real pedal: its USB cable was pulled and plugged back in within two seconds, the port
+        check did not notice, and afterwards the pedal answered queries but confirmed no
+        parameter. Sending edit enable again is harmless."""
+        if now - self.last_reenable < EDIT_REENABLE_SECONDS:
+            return
+        self.last_reenable = now
+        self.sender.send(zs.build_edit_enable(self.device_id))
+
+    def _look_for_synth(self, now: float, force: bool = False) -> None:
+        """Asks the pedal for the current patch; _on_patch reads the answer. Unless forced, at
+        most once per SYNTH_QUERY_SECONDS: a query that comes too early is put off, not dropped."""
+        if not self.can_query_patch:
+            return
+        if not force and now - self.last_patch_query < SYNTH_QUERY_SECONDS:
+            if self.patch_query_at is None:
+                self.patch_query_at = self.last_patch_query + SYNTH_QUERY_SECONDS
+            return
+        self.last_patch_query = now
+        self.sender.send(zs.build_query_patch(self.device_id))
+
+    def _on_patch(self, dump: zs.PatchDump, now: float) -> None:
+        slot = next((index for index, effect in enumerate(dump.effects)
+                     if effect.id == self.synth["effect_id"]), None)
+        changed = slot != self.synth_slot or not self.synth_known
+        if slot != self.synth_slot:                 # what stood in the old place says nothing about the new one
+            self.targets, self.told = [], set()
+        self.synth_slot, self.synth_known = slot, True
+        if slot is None:
+            self.key_sent = self.note_sent = None
+            self.key_awaiting.clear()
+            if changed:
+                say("No KeySynth effect in this preset – the keyboard is ignored")
+        else:
+            if not self.key_awaiting and dump.effects[slot].first_param != self.key_sent:
+                self.key_sent = dump.effects[slot].first_param   # what the pedal's Key knob holds now
+                self.note_sent = None
+            if changed:
+                say(f"KeySynth is effect {slot + 1} – the keyboard plays it")
+        if changed:
+            self.refresh()
+        if self.keys.note is not None:
+            self._play(now)
 
     def _accept(self, value: int) -> bool:
         """Deadband: ignore small changes, but always let the end stops through."""
@@ -291,6 +669,11 @@ class Session:
 
     def _flush(self, now: float) -> None:
         """At most one message per minimum interval; the parameters take turns."""
+        # The pitch wheel comes before any other knob and keeps the configured pace: notes have
+        # their own check for missing acks, and a parameter the pedal does not confirm (which
+        # slows the others down) must not make a bend drag.
+        if now - self.last_send >= self.min_interval and self._bend_step(now):
+            return
         if now - self.last_send < self.interval:
             return
         for _ in self.targets:
@@ -339,6 +722,8 @@ class Session:
         for target in self.targets:
             while target.awaiting and now - target.awaiting[0].send_time > ACK_TIMEOUT:
                 self._miss(target, target.awaiting.popleft(), now)
+        while self.key_awaiting and now - self.key_awaiting[0].send_time > KEY_ACK_TIMEOUT:
+            self._key_miss(self.key_awaiting.popleft(), now)
 
     def _miss(self, target: Target, sent: Sent, now: float) -> None:
         """No ack. The pedal only confirms changes, so a single miss is normal."""
@@ -354,6 +739,8 @@ class Session:
             say(f"Preset {display(self.patch)}: the pedal does not accept {target.mapping.describe()} "
                 "– sending stopped")
             return
+        if self.misses_in_row >= MISSES_BEFORE_SLOWDOWN:
+            self._reenable_edit(now)
         if self.misses_in_row >= MISSES_BEFORE_SLOWDOWN and self.interval < MAX_INTERVAL:
             self.interval = min(self.interval * 2, MAX_INTERVAL)
             self.misses_in_row = 0
@@ -392,8 +779,17 @@ class Session:
         elif raw is not None:
             body = zs.zoom_body(raw, self.device_id)
             change, program_info = zs.parse_param(body), zs.parse_program_info(body)
+            dump = zs.parse_patch_dump(body) if self.synth is not None else None
             if program_info:
                 self._set_patch(*program_info)
+            elif dump:
+                self._on_patch(dump, now)
+            elif change and self.synth_slot is not None and (change.slot, change.param) == (
+                    self.synth_slot, zs.KEY_PARAM):
+                if change.ack:
+                    self._on_key_ack(change.value, now)
+                else:
+                    self.key_sent, self.note_sent = change.value, None   # the Key knob was turned on the pedal
             elif change:
                 target = next((t for t in self.targets if (t.mapping.slot, t.mapping.param) == (
                     change.slot, change.param)), None)
@@ -418,20 +814,64 @@ class Session:
         if self.learning is not None:
             self.learning = None
             say("Learning cancelled: preset changed")
+        if self.synth is not None:   # the effect may sit elsewhere now, or not be there at all
+            self.synth_slot, self.synth_known, self.key_sent, self.note_sent = None, False, None, None
+            self.key_awaiting.clear()
+            self.patch_query_at = time.monotonic() + QUERY_DELAY
+        self.targets, self.told = [], set()   # another preset: nothing is carried over, remarks are made afresh
         self.refresh()
-        if not self.targets:
+        expression = [target for target in self.targets if target.expression]
+        if not expression:
             say(f"Preset {display(self.patch)}: no assignment, expression is ignored")
         else:
             say(f"Preset {display(self.patch)}: expression → "
-                + " and ".join(target.mapping.describe() for target in self.targets))
+                + " and ".join(target.mapping.describe() for target in expression))
 
     def refresh(self) -> None:
         """Re-derive the assignments and allowlist targets for the current patch."""
-        self.targets, allowed = [], []
+        # A parameter that stays what it was keeps the value last sent to it, so that learning
+        # a controller for one knob does not make all the others send their values again.
+        before = {(target.mapping, target.expression): target for target in self.targets}
+
+        def carry(target: Target) -> Target:
+            old = before.get((target.mapping, target.expression))
+            if old is not None:
+                target.last_value, target.confirmed = old.last_value, old.confirmed
+            return target
+
+        def remark(text: str) -> None:              # once per preset and place of the effect
+            if text not in self.told:
+                self.told.add(text)
+                say(text)
+
+        self.targets, self.controls, allowed, knobs = [], {}, [], {}
+        if self.synth_slot is not None:
+            allowed += zs.synth_targets(self.synth_slot)
+            knobs = {zs.MIN_PARAM + index: knob for index, knob in enumerate(zs.SYNTH_KNOBS)}
         for mapping in (self.bridge.mappings.get(self.patch, ()) if self.patch else ()):
             learned = self.bridge.measurements.get(self.patch, mapping.slot, mapping.param) is not None
-            self.targets.append(Target(mapping, learned))
-            allowed.append(zs.ParamTarget(mapping.slot, mapping.param, mapping.min, mapping.max))
+            target = carry(Target(mapping, learned))
+            self.targets.append(target)
+            knob = knobs.get(mapping.param) if mapping.slot == self.synth_slot else None
+            if knob is None:
+                allowed.append(zs.ParamTarget(mapping.slot, mapping.param, mapping.min, mapping.max))
+            elif mapping.param == zs.KEY_PARAM:
+                target.blocked = True   # the keyboard owns the Key knob; expression must not write notes
+                remark(f"Expression is not sent to {mapping.describe()}: that is the KeySynth's Key knob")
+            elif mapping.max > knob[1]:
+                target.blocked = True   # a range learned from another effect or an older KeySynth
+                remark(f"Expression is not sent to {mapping.describe()}: the KeySynth's {knob[0]} knob "
+                       f"only goes up to {knob[1]} – learn it again")
+        if self.synth_slot is not None:   # the keyboard's controllers, one Target per knob
+            for name, number in self.bridge.controls.items():
+                param, top = zs.synth_knob(zs.SYNTH_CONTROLS[name][0])
+                target = next((t for t in self.targets if (t.mapping.slot, t.mapping.param) == (
+                    self.synth_slot, param)), None)
+                if target is None:
+                    target = Target(Mapping(self.synth_slot, param, 0, top), learned=True)
+                    target.expression = False
+                    self.targets.append(carry(target))
+                self.controls[number] = (target, name)
         self.sender.targets = tuple(allowed)
 
 
@@ -449,8 +889,13 @@ class Bridge:
         missing += [kind for kind in REQUIRED_KINDS if not self.approvals.is_approved(kind)]
         if missing:
             sys.exit(f"Approval missing: {', '.join(missing)} – see `python probe.py approve`.")
-        if self.cfg["zoom"]["device_id"] is None or self.cfg["expression"]["cc"] is None:
-            sys.exit("config.yaml is incomplete – finish phase 1 with probe.py first.")
+        self.synth = read_synth(self.cfg)
+        # Someone who only plays the keyboard synth has no expression controller to measure.
+        keyboard_only = self.synth is not None and not self.cfg["ports"].get("chocolate")
+        if self.cfg["zoom"]["device_id"] is None or (self.cfg["expression"]["cc"] is None and not keyboard_only):
+            sys.exit("config.yaml is incomplete – see “First-time setup” in README.md.")
+        self.controls: dict = read_controls(CONTROLS) if self.synth else {}   # knob name → CC number
+        self.control_learning: Optional[str] = None   # the knob waiting for a controller to be moved
 
         self.mappings: dict = {}   # (bank, program) → up to MAX_TARGETS mappings
         for key, entries in (self.cfg.get("mappings") or {}).items():
@@ -581,9 +1026,22 @@ class Bridge:
             "status": self.status,
             "patch": {"key": f"{patch[0]}/{patch[1]}", "display": display(patch)} if patch else None,
             "pedal": session.last_cc if session else None,
-            "targets": [{"value": target.last_value, "stopped": target.stopped,
+            "targets": [{"value": target.last_value, "stopped": target.stopped or target.blocked,
                          "unconfirmed": target.misses_in_row >= UNCONFIRMED_HINT}
-                        for target in session.targets] if session else [],
+                        for target in session.targets if target.expression] if session else [],
+            "synth": None if self.synth is None else {
+                "keyboard": bool(session and session.keyboard is not None),
+                "expression": bool(session and session.chocolate is not None),
+                "slot": session.synth_slot if session else None,
+                "key": session.key_sent if session else None,
+                "bend_range": self.synth["bend_range"],
+                "knobs": [{"name": name, "knob": knob, "rest": rest, "full": full, "cc": self.controls.get(name)}
+                          for name, (knob, rest, full) in zs.SYNTH_CONTROLS.items()],
+                "learning": self.control_learning,
+                "totals": dict(session.key_totals) if session else None,
+                "latency_ms": round(statistics.median(1000 * seconds for seconds in session.key_latencies), 1)
+                if session and session.key_latencies else None,
+            },
             "totals": dict(session.totals) if session else None,
             "latency_ms": round(statistics.median(latencies), 1) if latencies else None,
             "learning": learning,
@@ -642,6 +1100,44 @@ class Bridge:
             f"{limits['min']}–{limits['max']}")
         return {"slot": slot, "param": param, "min": limits["min"], "max": limits["max"],
                 "added": added, "known": known}
+
+    def synth_control(self, action: str, knob: Optional[str] = None) -> None:
+        """learn: the next controller moved on the keyboard will set this KeySynth knob.
+        cancel: stop waiting for one. clear: no controller sets the knob any more."""
+        if self.synth is None:
+            raise UserError("No keyboard synth is set up in config.yaml.")
+        if action == "cancel":
+            self.control_learning = None
+            return
+        if not isinstance(knob, str) or knob not in zs.SYNTH_CONTROLS:   # anything can arrive over HTTP
+            raise UserError("Unknown knob.")
+        if action == "clear":
+            self.control_learning = None
+            if self.controls.pop(knob, None) is not None:
+                self._store_controls()
+        elif action == "learn":
+            if self.session is None or self.session.keyboard is None:
+                raise UserError("The keyboard is not connected.")
+            self.control_learning = knob
+        else:
+            raise UserError("Unknown action.")
+
+    def learned_control(self, number: int) -> None:
+        """The session saw a controller move while a knob was waiting for one."""
+        knob = self.control_learning
+        if knob is None or number in RESERVED_CONTROLS:
+            return
+        self.control_learning = None
+        for other in [name for name, known in self.controls.items() if known == number]:
+            del self.controls[other]              # one controller sets one thing
+        self.controls[knob] = number
+        self._store_controls()
+        say(f"KeySynth: controller {number} now sets {knob}")
+
+    def _store_controls(self) -> None:
+        CONTROLS.write_text(json.dumps({"controls": self.controls}, indent=2) + "\n", encoding="utf-8")
+        if self.session is not None:
+            self.session.refresh()
 
     @staticmethod
     def _fit(mapping: Mapping, limits: dict) -> Mapping:

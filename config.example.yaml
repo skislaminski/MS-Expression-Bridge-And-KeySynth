@@ -24,6 +24,15 @@ bridge:
 ui:
   port: 8765                      # interface: http://127.0.0.1:8765
 
+synth:                            # optional: a MIDI keyboard plays the KeySynth effect (README, "Keyboard synth")
+  keyboard: ""                    # substring of the keyboard's port name; empty = switched off
+  channel: 0                      # 1–16, or 0 for any channel
+  effect_id: 0x07000F61           # id of the KeySynth effect on the pedal
+  low_note: 0                     # notes outside low_note–high_note are ignored (the effect plays 12–111)
+  high_note: 127
+  sustain: true                   # the sustain pedal (CC 64) holds notes
+  bend_range: 2                   # semitones the pitch wheel bends each way, 0–12; 0 = wheel ignored
+
 # Up to four parameters per preset. This section is written by the interface and must stay at
 # the end of the file. Key "bank/program", as the pedal reports the preset:
 # bank = (display - 1) // 10, program = (display - 1) % 10 (measured on preset 095 = "9/4").

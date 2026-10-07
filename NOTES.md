@@ -130,3 +130,190 @@ Session unverändert.
   sicher gescheitert wäre: `signal.SIGHUP` gibt es unter Windows nicht (Absturz beim Start). Vorsorglich:
   Konsolenausgabe bricht bei nicht darstellbaren Zeichen nicht mehr ab. Bekannt: Vor Python 3.11 schläft
   `time.sleep` unter Windows in Schritten von typisch 16 ms, die Bridge reagiert dann träger.
+
+## Parameter 1–12, 2026-10-07
+
+- Das Auswahlfeld bietet jetzt Parameter 1–12 je Effekt (`MAX_PARAMS = 12`, param 2–13), vorher 1–9.
+  Unverändert: Effekt 1–6, höchstens vier Parameter pro Preset, Schutz für nicht gelernte Parameter.
+- Ob das MS-60B+ Parameter 10–12 annimmt, ist am Gerät nicht geprüft.
+- Die Simulationsskripte aus der ersten Sitzung lagen in einem temporären Ordner und sind nicht mehr da.
+  Geprüft wurde diesmal nur die Validierung (Parameter 12 zulässig, 13 abgelehnt) und der gemeldete Grenzwert.
+
+## Tests fest im Projekt, 2026-10-07
+
+- `tests/` enthält 31 Tests gegen simulierte Geräte: Allowlist und Freigaben (`test_sysex.py`), Bridge und
+  Oberfläche (`test_bridge.py`), Einrichtungsskript (`test_probe.py`). Aufruf: `.venv/bin/python -m unittest`.
+- Das simulierte Pedal verhält sich wie am echten Gerät gemessen (Ack nur bei geändertem Wert, Presetmeldung
+  als `64 26 …` plus CC 0, CC 32, Program Change).
+- Klarstellung zur Zählweise: In der Oberfläche und am Pedal Parameter 1–12, intern `param` 2–13.
+
+## Keyboard-Synth, 2026-10-07
+
+- Neu: Ein MIDI-Keyboard spielt den DIY-Effekt KeySynth (Projekt `~/Desktop/ms-plus-synth`) über dessen
+  Key-Regler. Abschnitt `synth:` in `config.yaml`; beim Nutzer eingetragen: Keyboard `KOMPLETE KONTROL A61`,
+  alle Kanäle, Effekt-ID `07000f61`.
+- `zoom_sysex.py`: `build_set_key` (Parameter fest 2, Werte 0–128, Slot 0–5), `key_target`, `parse_patch_dump`.
+  Der Parser wurde gegen fünf echte Dumps des MS-60B+ vom 2026-10-07 geprüft (IDs, an/aus und Wert des ersten
+  Reglers stimmten mit dem Pedal überein); einer davon liegt als Testdaten in `tests/test_synth.py`.
+- `bridge.py`: Keyboard-Port, Spiellogik (`Keys`), Suche des Effekts per Patch-Abfrage, Noten ohne
+  Mindestabstand, Key = 0 beim Beenden. Chocolate und Keyboard sind mit `synth`-Abschnitt beide optional.
+- Tests: 29 neue in `tests/test_synth.py`, zusammen 60, alle bestanden. `tests/sim.py` kennt jetzt ein
+  Keyboard und beantwortet die Patch-Abfrage.
+- Am echten Gerät gemessen (im Projekt ms-plus-synth, nicht mit der Bridge): Key-Schreibvorgänge im
+  Sechzehntelraster bei 140 BPM (53,6 ms) 128 von 128 bestätigt, Ack im Median nach 9,4 ms, höchstens
+  11,5 ms; bei 26,8 ms Abstand ebenfalls 128 von 128. Slot-Zählung ab 0, 6 Slots.
+- Freigabe: `query_patch` vom Nutzer am 2026-10-07 um 02:22 Uhr erteilt.
+- Sicherung des Stands vor der Änderung: `~/Desktop/ms-plus-synth/backup/bridge-vor-phase4-2026-10-07/`.
+- `github-upload/` ist nicht aktualisiert; dafür `Prepare GitHub upload.command` ausführen.
+
+## Keyboard-Synth am echten Gerät, 2026-10-07 02:23–02:27 Uhr
+
+- Start nur mit Keyboard (`KOMPLETE KONTROL A61`), Chocolate nicht angesteckt: bereit nach unter 1 s,
+  Patch-Abfrage in 6 ms beantwortet.
+- Der Nutzer hat den KeySynth erst danach am Pedal eingefügt: sofort gefunden, ohne zweite Abfrage.
+  **Das Pedal meldet Kettenänderungen von sich aus:** Bei laufendem edit enable schickt es den Patch als
+  `64 12 00 …` (19-mal in diesem Lauf, auch beim Blättern im Effektmenü). Die Antwort auf `64 13`
+  beginnt mit `64 12 01 …`. Der Parser nimmt beide.
+- Effekt in der Kette verschoben (Effekt 1 → 2): über denselben Dump erkannt, danach an Slot 1 gesendet.
+- 188 Key-Sendungen, 186 bestätigt. Taste → Ack: Median 9,9 ms, 90 % unter 10,5 ms, 99 % unter 20,5 ms.
+- Zwei blieben unbestätigt:
+  1. Ein Gate-off ging verloren, während der Nutzer im Effektmenü des Pedals war. Die Wiederholung
+     250 ms später wurde bestätigt (Ack nach 47,9 ms). Daraufhin geändert: `KEY_ACK_TIMEOUT` 60 ms und bis
+     zu drei Wiederholungen des letzten Werts (`KEY_RETRIES`). Diese Änderung ist nur in der Simulation
+     geprüft.
+  2. Gate-off und neue Note im Abstand von 1 ms: Das Pedal bestätigte nur die Note. Kein Fehler im
+     Klang gemeldet.
+- Meldung des Nutzers: „Alles funktioniert.“ Kommt eine neue Note, während er im Menü des Pedals ist,
+  wirft ihn das Pedal aus dem Menü; bei gehaltenem Ton kann er sich im Menü bewegen. Das ist die Reaktion
+  des Pedals auf eine Parameter-Nachricht, die Bridge kann daran nichts ändern.
+- Unbekannte Meldung vom Pedal, einmal: `F0 52 00 6E 64 20 00 64 01 00 00 00 00 00 F7`.
+- Sauber beendet (SIGTERM): edit disable gesendet und bestätigt; Key stand schon auf 0.
+- 62 Tests bestanden (zwei neue für den verlorenen Gate-off).
+- **Noch nicht am echten Gerät geprüft:** Key 128 (7-Bit-Aufteilung), Abziehen des Keyboards im Betrieb,
+  Chocolate und Keyboard gleichzeitig, die schnellere Wiederholung.
+
+## Dauertest mit Keyboard-Synth, 2026-10-07 02:57–03:21 Uhr
+
+Aufbau: REAPER spielt Sechzehntel (8 Noten pro Sekunde) über den IAC-Treiber, die Bridge liest von dort.
+Zwei Durchgänge, zusammen rund 13 Minuten; der Nutzer hat nach 13 Minuten abgebrochen, die geplante Stunde
+ist nicht gelaufen.
+
+- 12233 Key-Sendungen, 11021 bestätigt. Kein Absturz, kein Verbindungsabbruch, sauber beendet.
+- **Unbestätigte Noten gibt es nur, während der Nutzer das Pedal bedient.** In den Minuten ohne Bedienung
+  (03:08, 03:09): 1421 von 1421 bestätigt, und in der Aufnahme kein gehaltener oder fehlender Ton. Mit
+  Bedienung (Regler eines anderen Effekts drehen, in der Kette oder der Effektauswahl blättern) antwortet
+  das Pedal 0,1 bis 0,7 s lang verspätet oder gar nicht; hörbar als kurz gehaltener Ton.
+- Presetwechsel weg und zurück (zweimal): Synth als fehlend gemeldet, Noten ignoriert, nach dem
+  Wiedereinfügen 10 bis 14 s später von selbst gefunden.
+- **USB-Kabel des Pedals rund 2 s gezogen (03:20:41):** Die Bridge hat das nicht bemerkt (keine Meldung
+  „Connection lost“; die Portprüfung läuft einmal pro Sekunde). Danach beantwortete das Pedal die
+  Patch-Abfrage, bestätigte aber 27 s lang keinen einzigen Parameter. Deutung: Nach dem Wiedereinstecken ist
+  der Edit-Modus aus. Laut Nutzer lief der Ton weiter; eine Aufnahme davon gibt es nicht.
+- Daraufhin geändert:
+  - Bleiben Parameter unbestätigt, sendet die Bridge erneut edit enable, höchstens alle 2 s
+    (`_reenable_edit`). Das gilt für Noten und für Expression.
+  - Die Warnung und die erneute Patch-Abfrage bei unbestätigten Noten kommen höchstens alle 5 s
+    (vorher bis zu einmal pro Sekunde, 59 Warnungen in neun Minuten).
+  - Das simulierte Pedal kennt jetzt den Edit-Modus und ein kurzes Umstecken (`World.replug`).
+- 65 Tests bestanden (drei neue). Am echten Gerät sind diese Änderungen noch nicht geprüft.
+- Am Rande: Die Parameter 9 und 10 (intern) hat das Pedal per SysEx angenommen und bestätigt.
+
+## Umbau für KeySynth 0.20, 2026-10-07 (entwickelt in `ms-plus-synth/bridge-staging/`, übernommen um 17:57 Uhr zusammen mit der Installation von 0.20 auf dem Pedal)
+
+Anlass: Der Nutzer wünscht Glide, Pitch Bend, Mod-Wheel und Keyboard-Regler für den Synth, und die Zuweisung
+soll mit jedem Keyboard gehen. Der Effekt bekommt dafür eine neue Reglerbelegung (Projekt ms-plus-synth,
+`NOTES.md`, „KeySynth 0.20“). Bridge und Effekt müssen zusammen gewechselt werden: Die alte Bridge spielt nur
+0.10, die neue nur 0.20.
+
+- **Key 0–1000:** Note und Bend in einer Zahl (`zs.key_for`), 10 Cent pro Schritt ab C0. Noten außerhalb
+  12–111 werden nicht gespielt.
+- **Pitch-Wheel:** `bend_range` in der Config (Standard 2). Bei klingender Note höchstens 9 Schritte pro
+  Nachricht, im Mindestabstand, vor allen anderen Reglern. Der letzte Schritt wird wiederholt, wenn das
+  Pedal ihn nicht bestätigt.
+- **Controller auf Regler:** anlernbar in der Oberfläche (Karte „Keyboard synth“), abgelegt in
+  `controls.json`. Ohne Datei: Mod-Wheel auf Rate.
+- **Anzeige:** nur noch Noten im Terminal, Bend-Schritte nicht. Die Zeile nennt die klingende Note.
+- **Überholte Werte** zählen nicht mehr als unbestätigt (neuer Zähler `overtaken`).
+- **Expression auf einen Synth-Regler** wird nicht gesendet, wenn der gelernte Bereich größer ist als der
+  Regler. Betrifft die Zuordnung des Nutzers für Preset 050 (Parameter 11, mit 0.10 als „Rate“ gelernt):
+  Mit 0.20 liegt dort „LFO“ (0–20), sie muss neu gelernt werden.
+- 84 Tests bestanden (19 neu). Die Karte wurde im Browser gegen einen nachgebauten Zustand geprüft
+  (Anlernen starten und abbrechen, keine Skriptfehler), nicht gegen echte Geräte.
+- **Am Gerät noch nicht geprüft:** alles hiervon. Key-Werte über 128, die Regler 3–13 von 0.20 per SysEx,
+  das Verhalten bei schnellen Bends (bis zu 100 Nachrichten pro Sekunde).
+
+## Erster Lauf mit KeySynth 0.20 am Gerät, 2026-10-07 18:09–18:13 Uhr
+
+- **Key bis 1000 funktioniert am Pedal:** 623 Key-Nachrichten, 588 bestätigt, die 35 übrigen von der nächsten
+  Nachricht überholt. Werte über 128 (bis 271) wurden 540-mal gesendet und bestätigt; ACK im Median nach 11 ms.
+- **Bend:** 520 Schritte bei klingender Note, Abstand mindestens 10 ms, bis zu 71 Key-Nachrichten in einer
+  Sekunde, ohne Ausfall und ohne Warnung.
+- **Controller auf Regler:** Mod-Wheel auf Rate 861 gesendet, 844 bestätigt. Die Parameter 3–12 des Effekts
+  (intern 3–11 und 13) wurden per SysEx gesetzt und bestätigt. Unbestätigt blieben nur Werte ohne Änderung
+  und überholte Werte.
+- **Anlernen in der Oberfläche:** elfmal benutzt, funktioniert. Das KOMPLETE KONTROL A61 sendet auf seinen
+  acht Drehreglern CC 14–21.
+- **Nachgebessert nach diesem Lauf:** Die Meldung über eine gesperrte Expression-Zuordnung kommt nur noch
+  einmal pro Preset (vorher nach jedem Anlernen erneut), und ein Regler, dessen Zuweisung sich nicht ändert,
+  behält seinen zuletzt gesendeten Wert (vorher ging er nach jedem Anlernen noch einmal hinaus). 85 Tests.
+- **Ziele „Vib“ und „Trm“ (Wunsch des Nutzers, 18:3x Uhr):** LFO-Tiefe per Wheel oder Regler ab Off, ohne
+  dass der Effekt einen weiteren Regler braucht. Zehn Stufen je Richtung (so fein wie der LFO-Regler des
+  Effekts). 86 Tests. Am Gerät noch nicht geprüft.
+- **Zweiter Lauf, 18:13–18:39 Uhr:** Der Nutzer hat einen Effekt vor den Synth gesetzt (Synth jetzt Effekt 2).
+  Die alte Expression-Zuordnung für Preset 050 (Effekt 1, Parameter 11, 0–100, gelernt mit KeySynth 0.10 an
+  dieser Stelle) zeigte damit auf den neuen Effekt 1 und war nicht mehr gesperrt. Um 18:37:50 gingen sieben
+  Werte an Slot 0, Parameter 12; das Pedal hat keinen bestätigt. Folge: „acks are missing“, Mindestabstand
+  20 ms, dann 40 ms, und damit auch ein langsamerer Bend. Das ist der bekannte Fall „Effekt getauscht, neu
+  lernen“; die Zuordnung sollte gelöscht oder neu gelernt werden.
+- **Daraufhin geändert:** Bend-Schritte halten immer den eingestellten Mindestabstand ein, unabhängig von der
+  Drosselung der übrigen Parameter. 87 Tests.
+- **Die Bridge endete um 18:39:53 ohne sauberes Beenden** (kein „Stopped.“, kein edit disable), als die
+  Claude-Sitzung neu startete. Letzte Nachricht war ein bestätigtes Key 0. Neu gestartet um 18:52 Uhr.
+
+## Umstellung auf KeySynth 0.21, 2026-10-07 19:49 Uhr
+
+- Der LFO-Regler des Effekts hat jetzt 101 Stellungen (Vib50 … Vib1, Off, Trm1 … Trm50), das Vibrato reicht
+  bis ±100 Cent. In der Bridge: `SYNTH_KNOBS` LFO 0–100, `LFO_OFF` 50. „Vib“ und „Trm“ haben damit 50 Stufen.
+- Zusammen mit der Installation von 0.21 auf dem Pedal übernommen; die Bridge spielt 0.20 nicht mehr richtig
+  (dort war Off = 10). 87 Tests.
+
+## Oberfläche und Name, 2026-10-07 21:15 Uhr (Wünsche des Nutzers)
+
+- **Name:** „Controller Bridge“ statt „Expression Bridge“ (Titel, README, Meldungen, Dateiname des Exports).
+  Exportdateien tragen jetzt `controller-bridge/1`; das alte `expression-bridge/1` wird beim Import weiter
+  angenommen. Der Ordner und die geplanten Pi-Dateinamen bleiben, wie sie sind.
+- **Keine Vorbelegung:** Ohne `controls.json` ist kein Keyboard-Regler zugewiesen (vorher Mod-Wheel auf Rate).
+  Die Zuweisungen des Nutzers wurden geleert: `controls.json` leer, `mappings: {}` in `config.yaml` (Preset 050
+  und 095). Die gelernten Bereiche in `measurements.json` sind geblieben. Der Stand davor liegt in
+  `ms-plus-synth/backup/bridge-vor-oberflaeche-2026-10-07/`.
+- **Reihenfolge:** „Keyboard synth“ steht oben, darunter „Expression pedal“ und die Expression-Zuordnungen.
+- **Aussehen:** schwarzes Bedienfeld im Holzrahmen, siehe `CLAUDE.md`. Nur CSS, kein Bild, keine fremde
+  Schrift. Im Browser gegen einen nachgebauten Zustand geprüft, auch mit 375 px Breite.
+- 88 Tests.
+
+## Durchsicht und Stand für GitHub, 2026-10-07 21:40–22:00 Uhr
+
+- **Learn-Schalter** einheitlich blau (auch „Learn parameter“); Orange bleibt für „Apply“ und „Save“.
+- **Zwei Fehler bei der Durchsicht gefunden und behoben:**
+  - `POST /api/synth` mit einem Regler, der kein Text ist (Liste, Objekt), hätte die Hauptschleife mit einem
+    `TypeError` beendet. Jetzt „Unknown knob.“; Test dazu.
+  - Wer nur das Keyboard nutzt, musste trotzdem einen Expression-CC in die Config eintragen, sonst startete
+    die Bridge nicht. Jetzt nur noch nötig, wenn unter `ports:` ein Expression-Controller steht; Test dazu.
+- pyflakes ohne Befund (ein ungenutzter Import in den Tests entfernt). Keine persönlichen Pfade im Code.
+- **App mit Icon:** `Start Bridge.command` legt `Controller Bridge.app` an (siehe `CLAUDE.md`). Am Mac des
+  Nutzers angelegt und darüber gestartet: Terminal-Fenster öffnet sich, Bridge „Ready“.
+- **`keysynth/`:** Effekt 0.21 (bytegleich mit der auf dem Pedal installierten Datei), Icon, Quellen, README,
+  Lizenz.
+- README überarbeitet (Keyboard gleichrangig, App-Icon, neue Messwerte, Dateiliste, Danksagung).
+- 89 Tests. Oberfläche mit den echten Geräten im Browser angesehen.
+
+## Name wieder „Expression Bridge“, 2026-10-07 22:10 Uhr (Wunsch des Nutzers)
+
+- Die Umbenennung in „Controller Bridge“ ist vollständig zurückgenommen, damit Name, Ordner und Repository
+  übereinstimmen: Titel, README, Meldungen, Export (`expression-bridge/1`, Dateiname `expression-bridge-…`),
+  Config-Kopfzeilen. Die App heißt jetzt `Expression Bridge.app`; die alte `Controller Bridge.app` ist entfernt.
+- Die kurzlebige Kennung `controller-bridge/1` wird beim Import nicht angenommen; in der Zwischenzeit gab es
+  keine Zuordnungen, also auch keine Exportdateien damit.
+- **SYNTHESIS SYNx2** wird jetzt deutlicher genannt: im README des Synths oben und unter „Credits“, außerdem im
+  README der Bridge. Übernommen wurde nur der Funktionsumfang als Idee, kein Code.
+

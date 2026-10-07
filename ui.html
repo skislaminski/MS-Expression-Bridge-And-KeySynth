@@ -1,0 +1,598 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Expression Bridge</title>
+<style>
+  /* The look follows a 1970s monosynth: a black control panel with white lettering in a walnut
+     case, rocker switches in orange, blue and white, a red pilot lamp. One look, no light mode. */
+  :root {
+    color-scheme: dark;
+    --wood: #5a3a22;
+    --panel: #151413; --soft: #211f1d; --card: #0e0d0c;
+    --ink: #f3f0e6; --muted: #b7b2a4; --line: rgba(243, 240, 230, .34);
+    --accent: #ee7a24; --accent-ink: #1c0e03; --blue: #6aa9df;
+    --lamp: #ff5433; --ok: #ff5433; --bad: #ff9a88;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; color: var(--ink); background-color: var(--wood);
+         background-image:
+           linear-gradient(90deg, rgba(0, 0, 0, .34), rgba(0, 0, 0, 0) 14%, rgba(0, 0, 0, 0) 86%, rgba(0, 0, 0, .34)),
+           repeating-linear-gradient(91deg, rgba(0, 0, 0, .13) 0 1px, rgba(255, 214, 160, .05) 1px 4px,
+                                     rgba(0, 0, 0, .07) 4px 9px, rgba(255, 214, 160, .03) 9px 17px);
+         font: 15px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+  main { max-width: 900px; margin: 22px auto 40px; padding: 18px 18px 8px;
+         background: linear-gradient(#1c1b19, var(--panel)); border: 1px solid #000; border-radius: 6px;
+         box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .06), 0 16px 34px rgba(0, 0, 0, .55); }
+  header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 14px;
+           margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--ink); }
+  h1 { font-size: 22px; margin: 0; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .18em; color: var(--ink);
+       margin: 0; font-weight: 700; }
+  .status { display: inline-flex; align-items: center; gap: 9px; color: var(--muted);
+            font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+  .dot { width: 13px; height: 13px; border-radius: 50%; flex: none; background: #3b2420; border: 1px solid #000;
+         box-shadow: inset 0 1px 2px rgba(0, 0, 0, .7); }
+  .dot.on { background: radial-gradient(circle at 35% 35%, #ffd9c7, var(--lamp) 55%, #a81c08);
+            box-shadow: 0 0 10px rgba(255, 84, 51, .85); }
+  section { border: 1px solid var(--line); border-radius: 4px; padding: 16px; margin-bottom: 14px; }
+  .section-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
+                  gap: 8px; margin-bottom: 12px; }
+  .now { display: grid; grid-template-columns: auto 1fr; gap: 6px 22px; align-items: center; }
+  .wide { grid-column: 1 / -1; margin-bottom: 8px; }
+  .preset { font-size: 54px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+  .preset small { display: block; font-size: 11px; font-weight: 700; color: var(--muted);
+                  letter-spacing: .14em; text-transform: uppercase; margin-bottom: 4px; }
+  .assigned { font-size: 16px; white-space: pre-line; font-variant-numeric: tabular-nums; }
+  .meter { height: 10px; background: var(--card); border: 1px solid #000; border-radius: 2px; overflow: hidden;
+           margin: 10px 0 4px; }
+  .meter i { display: block; height: 100%; width: 0; background: linear-gradient(#f79243, #d5630f); }
+  .readout { color: var(--muted); font-variant-numeric: tabular-nums; margin: 0; }
+  .actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 8px; }
+  /* buttons are rocker switches: white, orange to apply or save, blue for everything that learns */
+  button { font: inherit; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+           padding: 8px 14px; border-radius: 3px; border: 1px solid #000; cursor: pointer; white-space: nowrap;
+           color: #16120c; background: linear-gradient(#f7f3e8, #cbc5b3);
+           box-shadow: 0 2px 0 #000, inset 0 1px 0 rgba(255, 255, 255, .7); }
+  button.primary { background: linear-gradient(#f79243, #d5630f); color: var(--accent-ink); }
+  button.learn-btn { background: linear-gradient(#8ec0ec, #4d8fc9); }
+  button:active:not(:disabled) { transform: translateY(1px); box-shadow: 0 1px 0 #000; }
+  button:disabled { opacity: .4; cursor: default; }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+  .learn { border-color: var(--blue); }
+  .learn h2 { margin-bottom: 10px; }
+  .learn ol { margin: 0 0 10px; padding-left: 20px; }
+  .seen { font-variant-numeric: tabular-nums; margin: 0 0 12px; min-height: 1.5em; }
+
+  .block { border-top: 1px solid var(--line); padding: 14px 0; }
+  .block:first-child { border-top: 0; padding-top: 0; }
+  .block-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+  .num { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .num span { font-size: 11px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; margin-right: 6px; }
+  .block.current .num { color: var(--accent); }
+  .target { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 8px 10px; align-items: end;
+            background: var(--soft); border: 1px solid #000; border-radius: 4px; padding: 10px 12px; margin-top: 10px; }
+  .f-target { grid-column: 1 / span 7; }
+  .f-name { grid-column: 8 / span 5; }
+  .f-heel { grid-column: 1 / span 2; }
+  .f-toe { grid-column: 3 / span 2; }
+  .f-swap { grid-column: 5 / span 3; }
+  .f-curve { grid-column: 8 / span 3; }
+  .f-drop { grid-column: 11 / span 2; }
+  .note { grid-column: 1 / -1; font-size: 12px; color: var(--muted); margin: 0; }
+  .block-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
+  label { display: block; font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+          color: var(--muted); }
+  input, select { font: inherit; font-weight: 400; letter-spacing: 0; text-transform: none; width: 100%;
+                  padding: 6px 8px; margin-top: 3px; border: 1px solid var(--line); border-radius: 3px;
+                  background: var(--card); color: var(--ink); }
+  .empty, .hint { color: var(--muted); margin: 0; }
+  .hint { font-size: 13px; }
+  code { color: var(--ink); }
+  #newPreset { width: 76px; margin: 0; }
+  /* one row per knob of the synth, each with a little knob in front */
+  .knobs { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; margin: 10px 0; }
+  .knob { display: flex; align-items: center; gap: 10px; background: var(--soft); border: 1px solid #000;
+          border-radius: 4px; padding: 8px 10px; }
+  .knob::before { content: ""; flex: none; width: 26px; height: 26px; border-radius: 50%; transform: rotate(-40deg);
+                  background: linear-gradient(#fff, #fff) no-repeat center top / 2px 8px,
+                              radial-gradient(circle, #dcdcdc 0 30%, #7d7d7d 31% 37%, #0b0b0b 38%);
+                  box-shadow: 0 2px 3px rgba(0, 0, 0, .8), inset 0 0 0 1px #3a3a3a; }
+  .knob b { min-width: 48px; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
+  .knob span { flex: 1; color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .knob.waiting { border-color: var(--blue); }
+  .knob.waiting span { color: var(--blue); }
+  .knob button { padding: 5px 8px; font-size: 11px; }
+  #message { position: sticky; top: 8px; z-index: 2; padding: 10px 14px; border-radius: 4px; margin-bottom: 12px;
+             background: #2b2926; border: 1px solid var(--line); }
+  #message.error { border-color: var(--bad); color: var(--bad); }
+  #log { margin: 8px 0 0; font: 12px/1.5 ui-monospace, Menlo, monospace; color: var(--muted); white-space: pre-wrap; }
+  [hidden] { display: none !important; }
+  @media (max-width: 620px) {
+    main { margin: 8px; padding: 14px 12px 4px; }
+    h1 { font-size: 18px; letter-spacing: .12em; }
+    .target { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .f-target, .f-name, .f-curve, .note { grid-column: 1 / -1; }
+    .f-heel, .f-swap { grid-column: 1; }
+    .f-toe, .f-drop { grid-column: 2; }
+    .preset { font-size: 44px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Expression Bridge</h1>
+    <span class="status"><i class="dot" id="dot"></i><span id="status">Connecting…</span></span>
+  </header>
+
+  <div id="message" hidden></div>
+
+  <section id="synth" hidden>
+    <div class="section-head"><h2>Keyboard synth</h2></div>
+    <p class="readout" id="synthStatus"></p>
+    <div class="knobs" id="knobs"></div>
+    <p class="hint">To set a KeySynth knob from your keyboard, click “Learn” next to it and move the knob, slider or wheel you want to use. Any control that sends values 0–127 works; one control sets one knob. “Vib” and “Trm” are the two halves of the LFO knob: with the control at rest the LFO is off, at full travel the vibrato or tremolo is deepest – the way a mod wheel works on a hardware synth. Notes and the pitch wheel always play the Key knob (the wheel bends ±<span id="bendRange"></span> semitones, see <code>bend_range</code> in config.yaml).</p>
+  </section>
+
+  <section class="now">
+    <h2 class="wide">Expression pedal</h2>
+    <div class="preset"><small>Preset on pedal</small><span id="preset">–</span></div>
+    <div>
+      <div class="assigned" id="assigned">–</div>
+      <div class="meter"><i id="bar"></i></div>
+      <p class="readout" id="readout">Pedal –</p>
+    </div>
+    <div class="actions">
+      <button class="learn-btn" id="learn">Learn parameter</button>
+      <span class="hint">Optional: reads a knob’s exact range from the MS-60B+ for the preset currently selected there.</span>
+    </div>
+  </section>
+
+  <section class="learn" id="learning" hidden>
+    <h2>Learn a parameter for preset <span id="learnPreset"></span></h2>
+    <ol>
+      <li>On the MS-60B+, select the effect the expression pedal should control.</li>
+      <li>Turn the knob you want all the way down and all the way up, once.</li>
+      <li>Click “Apply”.</li>
+    </ol>
+    <p class="seen" id="seen">Waiting for a knob movement…</p>
+    <div class="buttons">
+      <button class="primary" id="learnStop">Apply</button>
+      <button id="learnCancel">Cancel</button>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2>Expression assignments per preset</h2>
+      <div class="buttons">
+        <input id="newPreset" type="number" min="1" max="999" inputmode="numeric" aria-label="Preset number" title="Preset number">
+        <button id="addPreset">Add preset</button>
+        <button id="exportAll">Export all</button>
+        <button id="importButton">Import…</button>
+        <input type="file" id="importFile" accept=".json,application/json" hidden>
+      </div>
+    </div>
+    <div id="rows"></div>
+    <p class="empty" id="empty" hidden>No assignments yet. Enter a preset number and click “Add preset”.</p>
+    <p class="hint" style="margin-top:12px">The expression pedal can control up to four parameters per preset at once. “Heel” and “Toe” set the value a parameter has at each end of the pedal’s travel: use them to limit the range (e.g. 20 to 70) or to invert the direction (e.g. 100 to 0). Effect and parameter numbers follow the order on the pedal. If the pedal does not accept a parameter, sending to it stops and the preset shows a note above.</p>
+  </section>
+
+  <section>
+    <div class="section-head"><h2>Activity</h2></div>
+    <p class="readout" id="totals"></p>
+    <pre id="log"></pre>
+  </section>
+</main>
+
+<template id="presetTemplate">
+  <form class="block">
+    <div class="block-head">
+      <div class="num"><span>Preset</span><b></b></div>
+      <div class="buttons">
+        <button class="primary" name="save" disabled>Save</button>
+        <button type="button" name="exportOne">Export</button>
+        <button type="button" name="removeAll">Delete</button>
+      </div>
+    </div>
+    <div class="targets"></div>
+    <div class="block-foot">
+      <button type="button" name="add">+ Add parameter</button>
+    </div>
+  </form>
+</template>
+
+<template id="targetTemplate">
+  <div class="target">
+    <label class="f-target">Parameter<select data-field="target"></select></label>
+    <label class="f-name">Name<input data-field="name" maxlength="40" placeholder="e.g. Hold"></label>
+    <label class="f-heel">Heel<input data-field="heel" type="number" inputmode="numeric" required></label>
+    <label class="f-toe">Toe<input data-field="toe" type="number" inputmode="numeric" required></label>
+    <button type="button" class="f-swap" data-action="swap" title="Swap heel and toe">⇅ Invert</button>
+    <label class="f-curve">Curve<select data-field="curve">
+      <option value="linear">Linear</option>
+      <option value="log">Changes early</option>
+      <option value="exp">Changes late</option>
+    </select></label>
+    <button type="button" class="f-drop" data-action="drop">Remove</button>
+    <p class="note"></p>
+  </div>
+</template>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const label = (choice) => `Effect ${choice.slot + 1} · Parameter ${choice.param - 1}`;
+const same = (a, b) => a.slot === b.slot && a.param === b.param;
+const DEFAULT_RANGE = {min: 0, max: 100};     // suggested for a parameter whose range was not learned
+// Shown: the value at heel and toe. Stored: min, max and whether inverted.
+const toView = (t) => ({slot: t.slot, param: t.param, name: t.name, curve: t.curve,
+                        heel: t.invert ? t.max : t.min, toe: t.invert ? t.min : t.max});
+const toWire = (v) => ({slot: v.slot, param: v.param, name: v.name, curve: v.curve,
+                        min: Math.min(v.heel, v.toe), max: Math.max(v.heel, v.toe), invert: v.heel > v.toe});
+
+let state = null;
+let signature = "";
+let drafts = {};          // preset key → parameters with unsaved changes (also presets not saved yet)
+let shownPatch = null;
+let messageTimer = null;
+let knobSignature = "";   // what the keyboard-synth rows were last built from
+
+// Preset number as shown on the pedal ↔ key "bank/program"
+const keyOf = (number) => `${Math.floor((number - 1) / state.limits.per_bank)}/${(number - 1) % state.limits.per_bank}`;
+const displayOf = (key) => {
+  const [bank, program] = key.split("/").map(Number);
+  return String(bank * state.limits.per_bank + program + 1).padStart(3, "0");
+};
+const learnedFor = (key) => state.learned[key] || [];
+
+function showMessage(text, isError) {
+  const box = $("message");
+  box.textContent = text;
+  box.className = isError ? "error" : "";
+  box.hidden = false;
+  clearTimeout(messageTimer);
+  messageTimer = setTimeout(() => { box.hidden = true; }, isError ? 8000 : 3500);
+}
+
+async function post(path, body) {
+  try {
+    const response = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"},
+                                        body: JSON.stringify(body)});
+    const data = await response.json();
+    if (data.error) { showMessage(data.error, true); return null; }
+    await poll();
+    return data;
+  } catch (error) {
+    showMessage("The bridge is not reachable.", true);
+    return null;
+  }
+}
+
+async function download(url) {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) { showMessage((await response.json()).error || "Export failed.", true); return; }
+    const name = /filename="([^"]+)"/.exec(response.headers.get("Content-Disposition") || "");
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(await response.blob());
+    link.download = name ? name[1] : "expression-bridge.json";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  } catch (error) {
+    showMessage("The bridge is not reachable.", true);
+  }
+}
+
+async function poll() {
+  try {
+    state = await (await fetch("/api/state")).json();
+  } catch (error) {
+    $("dot").classList.remove("on");
+    $("status").textContent = "The bridge is not running.";
+    return;
+  }
+  renderLive();
+  renderRows(false);
+}
+
+function renderLive() {
+  const current = state.patch && state.mappings.find((m) => m.key === state.patch.key);
+  $("dot").classList.toggle("on", state.connected);
+  $("status").textContent = state.status || "";
+  $("preset").textContent = state.patch ? state.patch.display : "–";
+  $("assigned").textContent = !state.patch ? "No preset reported"
+    : !current ? "No assignment – the expression pedal is ignored"
+    : current.targets.map((t, i) => {
+        const live = state.targets[i] || {};
+        return `${label(t)}${t.name ? " · " + t.name : ""}  →  ${live.value == null ? "–" : live.value}`
+          + (live.stopped ? "  ·  stopped: the pedal does not accept it"
+             : live.unconfirmed ? "  ·  not confirmed by the pedal" : "");
+      }).join("\n");
+  $("bar").style.width = state.pedal == null ? "0" : `${(state.pedal / 127) * 100}%`;
+  $("readout").textContent = `Pedal ${state.pedal == null ? "–" : state.pedal}`;
+
+  const patchKey = state.patch && state.patch.key;      // suggest the pedal's preset for “Add preset”
+  if (patchKey && patchKey !== shownPatch && document.activeElement !== $("newPreset")) {
+    $("newPreset").value = Number(state.patch.display);
+    shownPatch = patchKey;
+  }
+
+  const learning = state.learning !== null;
+  $("learning").hidden = !learning;
+  $("learn").disabled = learning || !state.connected || !state.patch;
+  if (learning) {
+    $("learnPreset").textContent = state.patch ? state.patch.display : "";
+    const best = state.learning.slice().sort((a, b) => b.count - a.count)[0];
+    $("seen").textContent = best
+      ? `Detected: ${label(best)}, values ${best.min}–${best.max} (${best.count} messages)`
+      : "Waiting for a knob movement…";
+    $("learnStop").disabled = !best;
+  }
+
+  renderSynth();
+
+  const totals = state.totals;
+  $("totals").textContent = totals
+    ? `${totals.sent} sent · ${totals.acked} confirmed · ${totals.missed} unconfirmed`
+      + (state.latency_ms == null ? "" : ` · latency ${state.latency_ms} ms`)
+    : "";
+  $("log").textContent = state.events.join("\n");
+}
+
+// The keyboard synth: where the effect is, and which controller sets which of its knobs
+function renderSynth() {
+  const synth = state.synth;
+  $("synth").hidden = !synth;
+  if (!synth) return;
+  $("synthStatus").textContent = (synth.keyboard ? "Keyboard connected" : "Keyboard not connected")
+    + "  ·  " + (synth.slot == null ? "no KeySynth effect in this preset" : `KeySynth is effect ${synth.slot + 1}`)
+    + (synth.latency_ms == null ? "" : `  ·  note → confirmed ${synth.latency_ms} ms`);
+  $("bendRange").textContent = synth.bend_range;
+
+  const signature = JSON.stringify([synth.knobs, synth.learning, synth.keyboard]);
+  if (signature === knobSignature) return;      // rebuilding on every poll would swallow clicks
+  knobSignature = signature;
+  $("knobs").replaceChildren(...synth.knobs.map((knob) => {
+    const waiting = synth.learning === knob.name;
+    const row = document.createElement("div");
+    row.className = waiting ? "knob waiting" : "knob";
+    const name = document.createElement("b");
+    name.textContent = knob.name;
+    if (knob.knob !== knob.name) row.title = `The ${knob.knob} knob from Off (control at rest) to full depth`;
+    const control = document.createElement("span");
+    control.textContent = waiting ? "Move a control…"
+      : knob.cc == null ? "not assigned" : knob.cc === 1 ? "Mod wheel" : `CC ${knob.cc}`;
+    const learn = document.createElement("button");
+    learn.type = "button";
+    learn.className = waiting ? "" : "learn-btn";
+    learn.textContent = waiting ? "Cancel" : "Learn";
+    learn.disabled = !waiting && !synth.keyboard;
+    learn.addEventListener("click", () => post("/api/synth",
+      waiting ? {action: "cancel"} : {action: "learn", knob: knob.name}));
+    row.append(name, control, learn);
+    if (knob.cc != null && !waiting) {
+      const clear = document.createElement("button");
+      clear.type = "button";
+      clear.textContent = "Clear";
+      clear.addEventListener("click", () => post("/api/synth", {action: "clear", knob: knob.name}));
+      row.append(clear);
+    }
+    return row;
+  }));
+}
+
+// Saved presets plus presets that so far exist only as an unsaved draft
+function presetBlocks() {
+  const blocks = state.mappings.map((mapping) => ({...mapping, saved: true}));
+  for (const key of Object.keys(drafts)) {
+    if (!blocks.some((block) => block.key === key)) {
+      blocks.push({key, display: displayOf(key), targets: [], saved: false});
+    }
+  }
+  return blocks.sort((a, b) => a.display.localeCompare(b.display));
+}
+
+// A parameter for a new row: a learned one that is still free, otherwise the first free one
+function newTarget(key, used) {
+  const free = learnedFor(key).find((choice) => !used.some((t) => same(t, choice)));
+  if (free) return {slot: free.slot, param: free.param, name: "", curve: "linear", heel: free.min, toe: free.max};
+  for (let slot = 0; slot < state.limits.effects; slot++) {
+    for (let param = 2; param < 2 + state.limits.params; param++) {
+      if (!used.some((t) => same(t, {slot, param}))) {
+        return {slot, param, name: "", curve: "linear", heel: DEFAULT_RANGE.min, toe: DEFAULT_RANGE.max};
+      }
+    }
+  }
+}
+
+function renderRows(force) {
+  const rows = $("rows");
+  const next = JSON.stringify([state.mappings, state.learned, state.patch && state.patch.key]);
+  if (!force) {
+    if (next === signature) return;
+    const active = document.activeElement;      // do not redraw while someone is typing
+    if (rows.contains(active) && /^(INPUT|SELECT)$/.test(active.tagName)) return;
+  }
+  signature = next;
+  const blocks = presetBlocks();
+  rows.replaceChildren(...blocks.map(buildBlock));
+  $("empty").hidden = blocks.length > 0;
+  $("exportAll").disabled = state.mappings.length === 0;
+}
+
+function buildBlock(preset) {
+  const block = $("presetTemplate").content.firstElementChild.cloneNode(true);
+  const targets = drafts[preset.key] || preset.targets.map(toView);
+  const touch = (redraw) => {                    // remember the change; redraw when rows are added or removed
+    drafts[preset.key] = targets;
+    if (redraw) renderRows(true); else block.elements.save.disabled = false;
+  };
+  block.classList.toggle("current", !!state.patch && state.patch.key === preset.key);
+  block.querySelector(".num b").textContent = preset.display;
+  block.elements.save.disabled = !drafts[preset.key];
+  block.elements.exportOne.disabled = !preset.saved;
+  block.querySelector(".targets").append(
+    ...targets.map((_, index) => buildTarget(preset, targets, index, touch)));
+
+  block.elements.add.hidden = targets.length >= state.limits.targets;
+  block.elements.add.addEventListener("click", () => {
+    targets.push(newTarget(preset.key, targets));
+    touch(true);
+  });
+
+  block.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (await post("/api/mapping", {key: preset.key, targets: targets.map(toWire)})) {
+      delete drafts[preset.key];
+      renderRows(true);
+      showMessage(`Preset ${preset.display} saved.`);
+    }
+  });
+  block.elements.exportOne.addEventListener("click",
+    () => download(`/api/export?key=${encodeURIComponent(preset.key)}`));
+  block.elements.removeAll.addEventListener("click", async () => {
+    if (preset.saved) {
+      if (!confirm(`Delete the assignment for preset ${preset.display}?`)) return;
+      if (!await post("/api/delete", {key: preset.key})) return;
+      showMessage(`Preset ${preset.display} deleted.`);
+    }
+    delete drafts[preset.key];
+    renderRows(true);
+  });
+  return block;
+}
+
+function buildTarget(preset, targets, index, touch) {
+  const target = targets[index];
+  const row = $("targetTemplate").content.firstElementChild.cloneNode(true);
+  const field = (name) => row.querySelector(`[data-field=${name}]`);
+  const learnedOf = (t) => learnedFor(preset.key).find((choice) => same(choice, t));
+
+  // Every effect and parameter of the grid, plus learned ones outside it
+  const choices = [];
+  for (let slot = 0; slot < state.limits.effects; slot++) {
+    for (let param = 2; param < 2 + state.limits.params; param++) choices.push({slot, param});
+  }
+  for (const extra of [...learnedFor(preset.key), target]) {
+    if (!choices.some((choice) => same(choice, extra))) choices.push({slot: extra.slot, param: extra.param});
+  }
+  choices.sort((a, b) => a.slot - b.slot || a.param - b.param);
+  const groups = {};
+  for (const choice of choices) {
+    const known = learnedOf(choice);
+    const option = new Option(label(choice) + (known ? ` (${known.min}–${known.max})` : ""),
+                              `${choice.slot}/${choice.param}`);
+    option.disabled = targets.some((other, i) => i !== index && same(other, choice));
+    if (!groups[choice.slot]) {
+      groups[choice.slot] = document.createElement("optgroup");
+      groups[choice.slot].label = `Effect ${choice.slot + 1}`;
+      field("target").append(groups[choice.slot]);
+    }
+    groups[choice.slot].append(option);
+  }
+  field("target").value = `${target.slot}/${target.param}`;
+  field("name").value = target.name;
+  field("curve").value = target.curve;
+  const learned = learnedOf(target);
+  for (const name of ["heel", "toe"]) {
+    field(name).value = target[name];
+    field(name).min = learned ? learned.min : 0;
+    field(name).max = learned ? learned.max : state.limits.value;
+  }
+  const note = () => {
+    row.querySelector(".note").textContent =
+      (learned ? `Learned range ${learned.min}–${learned.max}. `
+               : "Range not learned: enter the values yourself; the pedal ignores values it does not accept. ")
+      + (target.heel > target.toe ? "Inverted: the value drops as you press the pedal down." : "");
+  };
+  note();
+
+  field("target").addEventListener("change", (event) => {     // another parameter: suggest its whole range
+    const [slot, param] = event.target.value.split("/").map(Number);
+    const range = learnedOf({slot, param}) || DEFAULT_RANGE;
+    Object.assign(target, {slot, param, heel: range.min, toe: range.max});
+    touch(true);
+  });
+  field("name").addEventListener("input", (event) => { target.name = event.target.value; touch(false); });
+  field("curve").addEventListener("change", (event) => { target.curve = event.target.value; touch(false); });
+  for (const name of ["heel", "toe"]) {
+    field(name).addEventListener("input", (event) => {
+      target[name] = Number(event.target.value);
+      note();
+      touch(false);
+    });
+  }
+  row.querySelector("[data-action=swap]").addEventListener("click", () => {
+    [target.heel, target.toe] = [target.toe, target.heel];
+    touch(true);
+  });
+  const drop = row.querySelector("[data-action=drop]");
+  drop.hidden = targets.length < 2;
+  drop.addEventListener("click", () => { targets.splice(index, 1); touch(true); });
+  return row;
+}
+
+$("addPreset").addEventListener("click", () => {
+  const number = Number($("newPreset").value);
+  if (!Number.isInteger(number) || number < 1 || number > 999) {
+    showMessage("Enter a preset number from 1 to 999.", true);
+    return;
+  }
+  const key = keyOf(number);
+  if (drafts[key] || state.mappings.some((mapping) => mapping.key === key)) {
+    showMessage(`Preset ${displayOf(key)} is already in the list.`, true);
+    return;
+  }
+  drafts[key] = [newTarget(key, [])];
+  renderRows(true);
+});
+
+$("learn").addEventListener("click", () => post("/api/learn", {action: "start"}));
+$("learnCancel").addEventListener("click", () => post("/api/learn", {action: "cancel"}));
+$("learnStop").addEventListener("click", async () => {
+  const key = state.patch && state.patch.key;
+  const done = await post("/api/learn", {action: "stop"});
+  if (!done || !done.result) return;
+  const result = done.result;
+  if (result.added || result.known) delete drafts[key];   // unsaved input for this preset is now outdated
+  renderRows(true);
+  showMessage(`Learned: ${label(result)}, values ${result.min}–${result.max}. `
+    + (result.added ? "Assigned to the preset."
+       : result.known ? "Its range has been updated."
+       : `The preset already has ${state.limits.targets} parameters; the learned range is kept for later.`));
+});
+
+$("exportAll").addEventListener("click", () => download("/api/export"));
+$("importButton").addEventListener("click", () => $("importFile").click());
+$("importFile").addEventListener("change", async (event) => {
+  const file = event.target.files[0];
+  event.target.value = "";
+  if (!file) return;
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+  } catch (error) {
+    showMessage("That is not an Expression Bridge export file.", true);
+    return;
+  }
+  const keys = Object.keys((data && data.presets) || {});
+  const replaced = state.mappings.filter((m) => keys.includes(m.key)).map((m) => m.display);
+  if (replaced.length && !confirm(`This file replaces the assignments for preset ${replaced.join(", ")}. Continue?`)) return;
+  const done = await post("/api/import", data);
+  if (done) {
+    for (const key of keys) delete drafts[key];
+    renderRows(true);
+    showMessage(`Imported: preset ${done.result.join(", ")}.`);
+  }
+});
+
+poll();
+setInterval(poll, 400);
+</script>
+</body>
+</html>
