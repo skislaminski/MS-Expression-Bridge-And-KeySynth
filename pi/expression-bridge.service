@@ -1,0 +1,25 @@
+# systemd unit for the Expression Bridge on a Raspberry Pi.
+#
+# Assumes: the code and its Python environment in /opt/expression-bridge, a user "bridge" in the
+# group "audio" (ALSA MIDI), and the settings file written by export.py on the boot partition.
+# Install:  sudo cp pi/expression-bridge.service /etc/systemd/system/
+#           sudo systemctl enable --now expression-bridge
+# NOT YET TRIED ON A PI: paths, the user and LED access have to be checked on the real system.
+
+[Unit]
+Description=Expression Bridge (MIDI controllers to the Zoom MS-60B+)
+# No network needed, and the bridge waits for its USB devices by itself.
+
+[Service]
+User=bridge
+Group=audio
+WorkingDirectory=/opt/expression-bridge
+ExecStart=/opt/expression-bridge/.venv/bin/python bridge.py --settings /boot/firmware
+# SIGTERM makes the bridge close the gate, switch the pedal's edit mode off and close the ports.
+KillSignal=SIGTERM
+TimeoutStopSec=5
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

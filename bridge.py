@@ -7,6 +7,9 @@ to its other knobs (learned in the interface, kept in controls.json).
   python bridge.py           bridge + interface in the browser (the address is printed on start)
   python bridge.py --open    also opens the interface in the browser
   python bridge.py --no-ui   bridge only
+  python bridge.py --settings FOLDER
+                             for a computer without screen (Raspberry Pi): runs from the settings
+                             file export.py wrote into FOLDER; no interface, nothing is stored
 
 Runs until Ctrl+C; if a device is missing it keeps looking. Only approved message kinds are sent
 (`python probe.py approve`), and only values within the ranges the pedal itself reported while
@@ -32,6 +35,8 @@ from typing import NamedTuple, Optional
 import mido
 import yaml
 
+import config_schema as cs
+import status_led
 import zoom_sysex as zs
 
 ROOT = Path(__file__).resolve().parent
@@ -77,6 +82,7 @@ CURVES = {
 }
 
 EVENTS: deque = deque(maxlen=8)   # latest status lines, for the interface
+HEADLESS = False                  # run from a settings file: lines go to the log only (the service's journal)
 
 
 class Disconnected(Exception):
@@ -89,7 +95,8 @@ class UserError(Exception):
 
 def say(text: str) -> None:
     line = f"{time.strftime('%H:%M:%S')}  {text}"
-    print(line, flush=True)
+    if not HEADLESS:
+        print(line, flush=True)
     EVENTS.append(line)
     zs.log.info("--  %s", text)
 
@@ -576,7 +583,7 @@ class Session:
         self.key_misses = 0
         self.key_totals["acked"] += 1
         self.key_latencies.append(now - sent.time)
-        if sent.bend:
+        if sent.bend or HEADLESS:
             return                                  # a moving wheel would flood the terminal
         if value:
             note, cents = zs.key_pitch(value)
@@ -879,12 +886,22 @@ class Bridge:
     """Configuration, assignments and the current connection. run() runs in the main thread; the
     interface reads state() and queues changes into the loop through call()."""
 
-    def __init__(self) -> None:
-        if not CONFIG.exists():
-            sys.exit("config.yaml is missing – see “First-time setup” in README.md.")
-        self.cfg = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
-        self.approvals = zs.Approvals(APPROVALS)
-        self.measurements = zs.Measurements(MEASUREMENTS)
+    def __init__(self, settings: Optional[dict] = None) -> None:
+        """settings: the content of a settings file (config_schema.py), already validated. Then
+        nothing is read from or written to this installation's own files."""
+        self.fixed = settings is not None
+        self.led: Optional[status_led.StatusLed] = None    # the status light of a bridge without screen
+        self.fallback = False                              # running with the previous settings file
+        if self.fixed:
+            self.cfg = settings
+            self.approvals = cs.Approvals(settings["approvals"])
+            self.measurements = cs.Measurements(settings.get("learned") or {})
+        else:
+            if not CONFIG.exists():
+                sys.exit("config.yaml is missing – see “First-time setup” in README.md.")
+            self.cfg = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+            self.approvals = zs.Approvals(APPROVALS)
+            self.measurements = zs.Measurements(MEASUREMENTS)
         missing = [] if self.approvals.backup_confirmed else ["backup"]
         missing += [kind for kind in REQUIRED_KINDS if not self.approvals.is_approved(kind)]
         if missing:
@@ -894,7 +911,9 @@ class Bridge:
         keyboard_only = self.synth is not None and not self.cfg["ports"].get("chocolate")
         if self.cfg["zoom"]["device_id"] is None or (self.cfg["expression"]["cc"] is None and not keyboard_only):
             sys.exit("config.yaml is incomplete – see “First-time setup” in README.md.")
-        self.controls: dict = read_controls(CONTROLS) if self.synth else {}   # knob name → CC number
+        self.controls: dict = {}                      # what a keyboard controller sets → CC number
+        if self.synth:
+            self.controls = dict(settings.get("controls") or {}) if self.fixed else read_controls(CONTROLS)
         self.control_learning: Optional[str] = None   # the knob waiting for a controller to be moved
 
         self.mappings: dict = {}   # (bank, program) → up to MAX_TARGETS mappings
@@ -970,6 +989,9 @@ class Bridge:
                     next_try = time.monotonic() + RETRY_SECONDS
                 if now >= next_snapshot:
                     self._publish()
+                    if self.led is not None:
+                        ready = self.session is not None and self.session.ready
+                        self.led.show(("fallback" if self.fallback else "ready") if ready else "waiting")
                     next_snapshot = now + SNAPSHOT_SECONDS
                 time.sleep(0.001 if self.session else 0.05)
         except KeyboardInterrupt:
@@ -1066,6 +1088,7 @@ class Bridge:
     def learn(self, action: str) -> Optional[dict]:
         """start: record knob movements on the pedal. stop: take the most-moved knob for the
         current preset. cancel: discard."""
+        self._changeable()
         session = self.session
         if session is None or not session.ready or session.patch is None:
             raise UserError("The MS-60B+ is not connected or has not reported a preset yet.")
@@ -1104,6 +1127,7 @@ class Bridge:
     def synth_control(self, action: str, knob: Optional[str] = None) -> None:
         """learn: the next controller moved on the keyboard will set this KeySynth knob.
         cancel: stop waiting for one. clear: no controller sets the knob any more."""
+        self._changeable()
         if self.synth is None:
             raise UserError("No keyboard synth is set up in config.yaml.")
         if action == "cancel":
@@ -1134,7 +1158,13 @@ class Bridge:
         self._store_controls()
         say(f"KeySynth: controller {number} now sets {knob}")
 
+    def _changeable(self) -> None:
+        if self.fixed:
+            raise UserError("The settings come from a settings file; change them on the computer "
+                            "they were exported from.")
+
     def _store_controls(self) -> None:
+        self._changeable()
         CONTROLS.write_text(json.dumps({"controls": self.controls}, indent=2) + "\n", encoding="utf-8")
         if self.session is not None:
             self.session.refresh()
@@ -1148,6 +1178,7 @@ class Bridge:
         return replace(mapping, min=low, max=high)
 
     def save_mapping(self, key: str, data: dict) -> None:
+        self._changeable()
         try:
             patch = parse_key(key)
             mappings = tuple(to_mapping(entry) for entry in data["targets"])
@@ -1160,6 +1191,7 @@ class Bridge:
         self._store()
 
     def delete_mapping(self, key: str) -> None:
+        self._changeable()
         try:
             self.mappings.pop(parse_key(key), None)
         except ValueError:
@@ -1187,6 +1219,7 @@ class Bridge:
     def import_data(self, data) -> list:
         """Applies an export file: its presets replace existing ones with the same number, and
         its ranges count as learned. Returns the display numbers of the presets."""
+        self._changeable()
         if not isinstance(data, dict) or data.get("format") != EXPORT_FORMAT or not isinstance(
                 data.get("presets"), dict) or not data["presets"]:
             raise UserError("That is not an Expression Bridge export file.")
@@ -1218,6 +1251,7 @@ class Bridge:
 
     def _store(self) -> None:
         """Rewrites the `mappings:` section at the end of config.yaml and applies it at once."""
+        self._changeable()
         head, found, _ = CONFIG.read_text(encoding="utf-8").partition("\nmappings:")
         if not found:
             raise UserError("config.yaml has no “mappings:” section.")
@@ -1237,19 +1271,73 @@ def interrupt(signum, frame) -> None:
     raise KeyboardInterrupt
 
 
+def _wait_forever() -> None:
+    while True:
+        time.sleep(0.5)
+
+
+def safe_mode(led: status_led.StatusLed, reason: str) -> None:
+    """Nothing is sent to the pedal any more; the light says so until the service is stopped."""
+    say(f"SAFE MODE – nothing is sent to the pedal: {reason}")
+    led.show("safe")
+    try:
+        _wait_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+def run_headless(folder: Path) -> None:
+    """The bridge on a computer without screen: settings from the file export.py wrote into the
+    folder (or the previous one), no interface, nothing stored, everything logged to the console
+    (the service's journal), and the status light instead of a display."""
+    global HEADLESS
+    HEADLESS = True
+    zs.setup_logging(None, console=True)
+    led = status_led.StatusLed.find()
+    led.show("waiting")
+    try:
+        if led.problem:
+            say(f"The status light cannot be used: {led.problem}")
+        settings, source, problems = cs.load_with_fallback(folder)
+        for problem in problems:
+            say(f"Settings: {problem}")
+        if settings is None:
+            safe_mode(led, "there is no usable settings file")
+            return
+        try:
+            bridge = Bridge(settings)
+        except SystemExit as stopped:
+            safe_mode(led, str(stopped))
+            return
+        bridge.led, bridge.fallback = led, source == "previous"
+        say(f"Settings exported {settings.get('exported_at', 'at an unknown time')}"
+            + (" – this is the PREVIOUS file, the current one is not usable" if bridge.fallback else ""))
+        try:
+            bridge.run()
+        except SystemExit as stopped:                # the pedal is not the one the settings are for
+            safe_mode(led, str(stopped))
+    finally:
+        led.close()
+
+
 def main(argv: Optional[list] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--no-ui", action="store_true", help="start without the interface")
     parser.add_argument("--open", action="store_true", help="open the interface in the browser")
+    parser.add_argument("--settings", metavar="FOLDER", type=Path,
+                        help="run from the settings file in this folder (made by export.py), without interface")
     args = parser.parse_args(argv)
 
     zs.tolerant_console()
-    bridge = Bridge()
-    zs.setup_logging(ROOT / "logs", console=False)
     for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):   # also stop cleanly when the window is closed
         if hasattr(signal, name):                    # SIGHUP is missing on Windows, SIGBREAK elsewhere
             signal.signal(getattr(signal, name), interrupt)
+    if args.settings is not None:
+        run_headless(args.settings)
+        return
+    bridge = Bridge()
+    zs.setup_logging(ROOT / "logs", console=False)
     if not args.no_ui:
         import ui
         address = ui.serve(bridge, bridge.cfg.get("ui") or {})

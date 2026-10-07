@@ -317,3 +317,16 @@ soll mit jedem Keyboard gehen. Der Effekt bekommt dafür eine neue Reglerbelegun
 - **SYNTHESIS SYNx2** wird jetzt deutlicher genannt: im README des Synths oben und unter „Credits“, außerdem im
   README der Bridge. Übernommen wurde nur der Funktionsumfang als Idee, kein Code.
 
+## Phase 4 begonnen: Vorbereitung für den Raspberry Pi, 2026-10-07 22:30–23:00 Uhr (ohne Pi)
+
+- Neu: `config_schema.py`, `export.py`, `status_led.py`, `pi/expression-bridge.service`, `bridge.py --settings ORDNER`;
+  Einzelheiten und Abweichungen vom Plan stehen in `CLAUDE.md` unter „Phase 4“.
+- Der echte Stand dieser Installation besteht `export.py --check` (0 Presets mit Zuordnung, 5 gelernte Bereiche,
+  1 Keyboard-Controller). Geschrieben wurde nichts.
+- Beim Bauen gefunden und behoben: Zeitstempel wurden zuerst als „rohe Bytes“ erkannt; abgelehnte Änderungen im
+  Betrieb aus der Datei veränderten den Zustand, bevor sie abgelehnt wurden; die LED wechselte ihr Muster erst nach
+  bis zu einer Sekunde.
+- 110 Tests (21 neu), pyflakes ohne Befund.
+- **Nichts davon lief auf einem Pi.** Die Recherche zur Hardware steht im Projekt ms-plus-synth, `NOTES.md`.
+- `github-upload/` enthält noch den Stand von 22:15 Uhr, ohne diese Dateien.
+

@@ -480,15 +480,19 @@ def tolerant_console() -> None:
             stream.reconfigure(errors="replace")
 
 
-def setup_logging(log_dir: Path, console: bool = True) -> Path:
-    """Everything sent and received goes to logs/sysex.log (rotating), optionally to the console."""
-    log_dir.mkdir(exist_ok=True)
-    path = log_dir / "sysex.log"
+def setup_logging(log_dir: Optional[Path], console: bool = True) -> Optional[Path]:
+    """Everything sent and received goes to logs/sysex.log (rotating), optionally to the console.
+    Without a folder it goes to the console only (a service's journal, on a read-only system)."""
+    path = None
     fmt = "%(asctime)s.%(msecs)03d  %(message)s"
-    to_file = logging.handlers.RotatingFileHandler(path, maxBytes=5_000_000, backupCount=3,
-                                                   encoding="utf-8")
-    to_file.setFormatter(logging.Formatter(fmt, "%Y-%m-%d %H:%M:%S"))
-    log.handlers[:] = [to_file]
+    log.handlers[:] = []
+    if log_dir is not None:
+        log_dir.mkdir(exist_ok=True)
+        path = log_dir / "sysex.log"
+        to_file = logging.handlers.RotatingFileHandler(path, maxBytes=5_000_000, backupCount=3,
+                                                       encoding="utf-8")
+        to_file.setFormatter(logging.Formatter(fmt, "%Y-%m-%d %H:%M:%S"))
+        log.addHandler(to_file)
     if console:
         to_console = logging.StreamHandler()
         to_console.setFormatter(_ConsoleFormatter(fmt, "%H:%M:%S"))

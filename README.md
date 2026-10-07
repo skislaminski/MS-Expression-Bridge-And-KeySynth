@@ -250,6 +250,32 @@ plays that effect:
 Each confirmed note is printed with the time from key press to the pedal's acknowledgement
 (bend steps are not, they would flood the terminal).
 
+## On a Raspberry Pi, without screen (in progress)
+
+The aim is a small box on the pedalboard instead of a computer: a Raspberry Pi with the
+controllers and the pedal plugged in, starting the bridge when it is switched on. **This has
+not run on a Pi yet.** What exists was written and tested against the simulated devices only:
+
+- `export.py` gathers everything that was set up on this computer (ports, assignments, learned
+  ranges, approvals, the keyboard's controllers) into one file, `expression-bridge.yaml`, checks
+  it and writes it to the Pi's SD card. The file holds values only, no code and no SysEx bytes.
+
+  ```bash
+  .venv/bin/python export.py --check     # are the settings complete and valid?
+  .venv/bin/python export.py             # write to the card's boot partition and eject it
+  ```
+
+- `bridge.py --settings FOLDER` runs from that file: no interface, nothing stored, every message
+  logged to the console. A file that breaks a rule is not used; the bridge then takes the
+  previous one (`expression-bridge.prev.yaml`), and if that is unusable too it sends nothing.
+- The Pi's green activity LED is the display: slow blinking = waiting for a device, steady =
+  ready, two short flashes = ready with the previous settings, fast blinking = nothing is sent
+  (no usable settings, or a pedal other than the one the settings are for).
+- `pi/expression-bridge.service` is the unit for starting it at boot.
+
+Still to do, on the real device: installing, access to the LED, the read-only file system,
+power for a bus-powered keyboard, and the tests after pulling the plug.
+
 ## Safety
 
 - **Allowlist.** Every SysEx message is built in `zoom_sysex.py` and checked before sending.
@@ -330,6 +356,8 @@ hardware as well.
 | `bridge.py` | The bridge and its main loop |
 | `ui.py`, `ui.html` | The browser interface (local HTTP server, reachable from this computer only) |
 | `zoom_sysex.py` | SysEx builders, allowlist, parsers, approvals, learned ranges |
+| `config_schema.py`, `export.py` | The settings file for a bridge without screen: its rules, and writing it to the Pi's SD card |
+| `status_led.py`, `pi/` | Status light and systemd unit for the Raspberry Pi (not yet tried on one) |
 | `probe.py` | Setup and exploration: ports, identity, CC measurement, learn, verify, approvals |
 | `config.example.yaml` | Template for `config.yaml` |
 | `tests/` | Tests against simulated devices (`sim.py` is the simulated pedal and controller) |
