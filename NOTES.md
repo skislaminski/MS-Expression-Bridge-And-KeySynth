@@ -330,3 +330,16 @@ soll mit jedem Keyboard gehen. Der Effekt bekommt dafür eine neue Reglerbelegun
 - **Nichts davon lief auf einem Pi.** Die Recherche zur Hardware steht im Projekt ms-plus-synth, `NOTES.md`.
 - `github-upload/` enthält noch den Stand von 22:15 Uhr, ohne diese Dateien.
 
+
+## KeySynth für MS-50G+ und MS-70CDR+, 2026-10-07 (Wunsch des Nutzers, ungetestet)
+
+- `keysynth/` hat jetzt zwei Ordner: `ms-60b-plus/` (die bisherige, am Pedal geprüfte Datei, nur verschoben) und
+  `ms-50g-plus_ms-70cdr-plus/` (der unveränderte stomphacks-Build 0.21, Target `0x0090`, „SFX“). Beide Dateien
+  heißen `KEYSYNTH.ZD2`; Code und Tabellen sind bytegleich, sie unterscheiden sich in 18 Kopf-Bytes.
+- **Die Datei für MS-50G+ und MS-70CDR+ war auf keinem Pedal.** Der Nutzer hat keines der beiden Geräte.
+  Begründung und offene Punkte stehen im README des Synths und in `ms-plus-synth/NOTES.md`.
+- **Am Code der Bridge ist nichts geändert.** Sie prüft das Modell-Byte nicht, die Effekt-ID ist dieselbe,
+  Geräte-ID `6E` und Portname „ZOOM MS Plus Series“ gelten laut stomphacks und nam-to-zoom für alle drei Modelle,
+  alle drei haben 6 Slots. Nur am MS-60B+ belegt ist der Leser für den Patch-Dump (`parse_patch_dump`); findet er
+  den Synth nicht, meldet die Bridge das und ignoriert das Keyboard. Die Meldungen nennen weiter das MS-60B+.
+- README und Dateiliste nachgezogen.

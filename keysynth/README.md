@@ -9,19 +9,26 @@ MS pedals (see [Credits](#credits-and-license)).
 
 | File | What it is |
 |---|---|
-| `KEYSYNTH.ZD2` | The effect, version 0.21, ready to install on an **MS-60B+** |
-| `KEYSYNTH.ZIC` | Its icon; the installer wants it next to the effect |
+| `ms-60b-plus/KEYSYNTH.ZD2` | The effect, version 0.21, ready to install on an **MS-60B+**. The only file here that has been on a pedal |
+| `ms-50g-plus_ms-70cdr-plus/KEYSYNTH.ZD2` | The same effect with the header for the **MS-50G+** and **MS-70CDR+**. **Untested**, see [MS-50G+ and MS-70CDR+](#ms-50g-and-ms-70cdr-untested) |
+| `KEYSYNTH.ZIC` in both folders | Its icon; the installer wants it next to the effect |
 | `source/` | Everything needed to rebuild it: kernel, tables, desktop tests, tools |
 
-SHA-256 of `KEYSYNTH.ZD2`: `c54edc5a5ac5d1f2f5d6ae5867c2ac3bb58820e876284f5e11a555687667243d`
+Both files are called `KEYSYNTH.ZD2`, because the name is part of the effect on the pedal. Take
+the one for your pedal and do not rename it.
+
+| File | SHA-256 |
+|---|---|
+| `ms-60b-plus/KEYSYNTH.ZD2` | `c54edc5a5ac5d1f2f5d6ae5867c2ac3bb58820e876284f5e11a555687667243d` |
+| `ms-50g-plus_ms-70cdr-plus/KEYSYNTH.ZD2` | `eddc43cf90f55c5d7a3abe86c0c948b03be2b1d214c7bb1b1bf331c59d2527dd` |
 
 > **Read this first.** A custom effect is code that runs inside your pedal. A faulty effect in a
 > *saved* patch, or a file transfer that is interrupted, **can leave the pedal unable to start,
 > and there is no dependable way back.** This effect was built with
 > [stomphacks](https://github.com/thammer/stomphacks) and tested on **one** MS-60B+ with
-> firmware **1.20**, nothing else. It is unofficial, not affiliated with or supported by Zoom,
-> and you use it at your own risk. Read stomphacks' `SAFETY.md` completely before you connect
-> anything.
+> firmware **1.20**, nothing else. The file for the MS-50G+ and MS-70CDR+ has not been on any
+> pedal at all. It is unofficial, not affiliated with or supported by Zoom, and you use it at
+> your own risk. Read stomphacks' `SAFETY.md` completely before you connect anything.
 
 ## What it does
 
@@ -50,9 +57,9 @@ How the pitch moves: a note after a gap starts on pitch. A move of the Key knob 
 semitone counts as a bend and is smoothed over about 20 ms, so the 10-cent steps do not show.
 A larger move while the gate is open is a tied note; with Glide on, the pitch slides there.
 
-On the MS-60B+ the effect appears in the category **Pitch shift** as “KEY SYNTH”. It declares a
-DSP load of 52 (the pedal adds up the declared loads of a patch and refuses effects beyond its
-budget).
+On the MS-60B+ the effect appears in the category **Pitch shift** as “KEY SYNTH” (on the MS-50G+
+and MS-70CDR+ its id puts it under **SFX**). It declares a DSP load of 52 (the pedal adds up the
+declared loads of a patch and refuses effects beyond its budget).
 
 ## Installing it
 
@@ -91,12 +98,43 @@ was developed on, versions of this effect were saved in a patch and the pedal st
 patch without trouble. That is one pedal and one firmware. If you save it, make a fresh backup
 first, and be aware of what you are risking.
 
-### Other MS Plus pedals
+### MS-50G+ and MS-70CDR+ (untested)
 
-`KEYSYNTH.ZD2` carries the header of an MS-60B+ effect (target field `0x00a0`, group name
-“PITCH SHIFT”). stomphacks itself builds for the MS-70CDR+ with other values there. Whether this
-file loads on any other pedal is unknown; do not try it without reading up on the differences.
-For another model, build from `source/` and leave out the last step.
+`ms-50g-plus_ms-70cdr-plus/KEYSYNTH.ZD2` is the build exactly as stomphacks writes it: target
+field `0x0090`, group name “SFX”, id `07000f61`. Code and tables are byte-identical with the
+MS-60B+ file; the two differ in 18 bytes of the header (the MS-60B+ file carries target `0x00a0`
+and group name “PITCH SHIFT”).
+
+**This file has never been installed on an MS-50G+ or an MS-70CDR+.** Neither pedal was
+available. What speaks for it, all of it read from other people's work and not measured here:
+
+- stomphacks' own example effects carry this header and are reported loading and running on an
+  MS-70CDR+ with firmware 1.20.
+- In the zoom-zt2 catalogs 29 stock effects are the very same file on the MS-50G+ and the
+  MS-70CDR+, so the two pedals take the same effect files, and group `07` is SFX on both.
+- [nam-to-zoom](https://github.com/digcha-ka/nam-to-zoom) reports a custom effect running on an
+  MS-50G+ with firmware 1.40.
+
+What nobody has checked: whether KeySynth loads and sounds right there, whether its declared load
+of 52 is honest on those pedals, how the long value lists display, and what happens when a patch
+with it is saved. If you try it anyway:
+
+- Follow stomphacks' order: `writetest` before `install`, scroll over the effect in the pedal's
+  browser before you add it to a patch, and keep it in an unsaved patch.
+- Look at your own backup first: the installer checks id, name and filename against Zoom's
+  effects only, not against other custom effects that may already use id `07000f61`.
+- Do not put the MS-60B+ file on these pedals or this file on an MS-60B+. Whether a pedal loads
+  a file with another model's header is unknown.
+
+The bridge has nothing in it that is set per pedal model: the effect id is the same, it does not
+look at the model in the pedal's identity reply, and stomphacks and nam-to-zoom find these
+pedals under the same port name (“ZOOM MS Plus Series”) and device id (`6E`) as the MS-60B+. It
+is itself tested with an MS-60B+ only. It finds the synth by reading the current patch, and that
+reader was checked against patches of an MS-60B+; if it does not find the effect, it says so and
+ignores the keyboard.
+
+A report of what happened (pedal, firmware, what you saw) is welcome as an issue. For the
+MS-80IR+ and MS-200D+ nothing is prepared.
 
 ## What was tested (MS-60B+, firmware 1.20)
 
@@ -136,6 +174,8 @@ stomphacks/.venv/bin/python3 tools-local/adapt_ms60b.py \
 - `tools-local/adapt_ms60b.py` copies three header fields (18 bytes) from a stock effect of the
   same category **out of your own pedal backup** and recomputes the checksum. The result lands
   in `effects/keysynth/ms60b/`. No file from Zoom is part of this repository.
+- That last step is for the MS-60B+ only. The file for the MS-50G+ and MS-70CDR+ is
+  `effects/keysynth/build/KEYSYNTH.ZD2` as the build leaves it.
 - `tools-local/kernel_cycles.py` estimates the cycles per block from the disassembly, to choose
   the declared DSP load.
 

@@ -217,8 +217,9 @@ Optional, and only useful with the custom effect **KeySynth** (version 0.21 or l
 on the pedal: a two-oscillator synth voice whose first knob, "Key", is gate and pitch in one
 number (0 = off, n = 10-cent steps above C0). The effect, its source and how to install it are
 in [`keysynth/`](keysynth/README.md); **read the warnings there first**, a custom effect can
-make a pedal unusable. With the `synth:` section filled in in `config.yaml`, a MIDI keyboard
-plays that effect:
+make a pedal unusable. (There is also a build of the effect for the MS-50G+ and MS-70CDR+ in
+there. It is untested, and so is the bridge with those pedals.) With the `synth:` section filled
+in in `config.yaml`, a MIDI keyboard plays that effect:
 
 - Monophonic, last note wins; releasing it returns to a note that is still held. Note on with
   velocity 0 counts as note off, the sustain pedal (CC 64) holds notes, "all notes off" and
@@ -364,7 +365,7 @@ hardware as well.
 | `Start Bridge.command` | macOS launcher: sets up the environment if needed, makes the clickable app and starts the bridge |
 | `Start Bridge.bat` | The same for Windows, without the app (untested) |
 | `icon.png`, `icon.ico` | The icon of the app, and the same for a Windows shortcut |
-| `keysynth/` | The KeySynth effect for the pedal: ready-made file, source, tests, install notes |
+| `keysynth/` | The KeySynth effect for the pedal: ready-made files (MS-60B+; untested for MS-50G+ and MS-70CDR+), source, tests, install notes |
 | `Prepare GitHub upload.command` | macOS helper for maintainers: collects the publishable files in `github-upload/` |
 | `NOTES.md`, `CLAUDE.md` | Development notes and the original project brief (German) |
 
