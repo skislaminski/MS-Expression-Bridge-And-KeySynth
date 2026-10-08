@@ -45,6 +45,8 @@ See [Installation](#installation) for all three systems.
 - Optional: a MIDI keyboard plays the custom effect KeySynth (one voice) or KeyPoly (four voices)
   on the pedal, with pitch wheel, and with any wheel, knob or slider of the keyboard assigned to
   the synth's knobs by "Learn", see [Keyboard synth](#keyboard-synth)
+- Optional: an arpeggiator for the keyboard synth, at its own tempo or to MIDI clock, see
+  [Arpeggiator](#arpeggiator)
 - Sends only message kinds you have approved, and logs every SysEx message sent and received
 
 ## Before you start
@@ -282,6 +284,31 @@ Key knobs by hand; the bridge gives every note one of them:
   Wave1), LFO 0–100 with Off in the middle (as KeySynth's), all others 0–100. They are in
   `zoom_sysex.py` (`POLY_KNOBS`); compare them with KeyPoly's `manifest.json` before you play it.
 
+### Arpeggiator
+
+The bridge can play the keys that are down one after another, on KeySynth and KeyPoly alike
+("Arpeggiator" under "Keyboard synth" in the interface). **It has not run on a pedal yet.**
+
+- **Mode:** up, down, up and down, as played (in the order the keys were pressed) or random.
+  **Octaves:** 1–4. **Rate:** 1/4 to 1/32, triplets included. **Gate:** how much of a step a note
+  sounds; at 100 % the notes are tied (with KeySynth's Glide they slide).
+- **Latch** keeps a chord playing after you let go, until you play a new one. Notes the sustain
+  pedal holds stay in the chord, too.
+- **Clock:** its own tempo (40–300 BPM; the first key starts it at once), or **MIDI clock**: it
+  follows the clock arriving at the keyboard's port, a step every so many clocks counted from Start,
+  so it stays on the beat. Stop silences it and starts the pattern over, Continue picks up again; a
+  clock that just stops silences it after half a second. The bridge listens to one keyboard port
+  only: for a DAW's clock, route the keyboard through the DAW to a virtual port (IAC on macOS) and
+  enter that port as `keyboard:`.
+- **On and off** in the interface, or from the keyboard: learn "On/Off" for a button or pedal (on
+  at values 64–127, like the sustain pedal). It is off whenever the bridge starts; its other
+  settings are kept in `controls.json` and travel to the Pi with `export.py`.
+- On KeyPoly every note takes the next voice, so the notes ring into each other. The pitch wheel
+  bends the arpeggio. Its notes are not printed in the terminal.
+- **Load:** a note and its gate-off per step, kept at least the minimum interval (10 ms) apart. At
+  1/16 and 120 BPM that is 16 messages per second, as in the 71-minute test; 1/32 at 300 BPM would
+  be 80 per second, more than has been tried on the pedal.
+
 ## On a Raspberry Pi, without screen (in progress)
 
 The aim is a small box on the pedalboard instead of a computer: a Raspberry Pi with the
@@ -376,8 +403,9 @@ controller. They open no real MIDI port and need no hardware.
 ```
 
 Run them after every change. They cover the allowlist, throttling, preset changes, replugging,
-learning, saving, export and import, how parameters that were not learned are handled, and
-the keyboard synth (with one real patch dump of the pedal as a fixture). They take about two
+learning, saving, export and import, how parameters that were not learned are handled, the
+keyboard synth (with one real patch dump of the pedal as a fixture), KeyPoly's voices and the
+arpeggiator. They take about two
 minutes.
 What they cannot tell you is how a real pedal reacts, so check changes to the messages on
 hardware as well.
@@ -389,6 +417,7 @@ hardware as well.
 | `bridge.py` | The bridge and its main loop |
 | `ui.py`, `ui.html` | The browser interface (local HTTP server, reachable from this computer only) |
 | `zoom_sysex.py` | SysEx builders, allowlist, parsers, approvals, learned ranges |
+| `arpeggiator.py` | The arpeggiator's notes and settings (bridge.py runs its clock) |
 | `config_schema.py`, `export.py` | The settings file for a bridge without screen: its rules, and writing it to the Pi's SD card |
 | `status_led.py`, `pi/` | Status light and systemd unit for the Raspberry Pi (not yet tried on one) |
 | `probe.py` | Setup and exploration: ports, identity, CC measurement, learn, verify, approvals |

@@ -105,6 +105,13 @@
   .knob.waiting { border-color: var(--blue); }
   .knob.waiting span { color: var(--blue); }
   .knob button { padding: 5px 8px; font-size: 11px; }
+  /* the arpeggiator: its switch lights up orange while it plays */
+  .arp { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 14px; }
+  .arp-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-bottom: 10px; }
+  h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .18em; margin: 0; font-weight: 700; }
+  .arp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 8px 12px; align-items: end; }
+  label.check { display: flex; align-items: center; gap: 8px; padding-bottom: 9px; }
+  label.check input { width: auto; margin: 0; }
   #message { position: sticky; top: 8px; z-index: 2; padding: 10px 14px; border-radius: 4px; margin-bottom: 12px;
              background: #2b2926; border: 1px solid var(--line); }
   #message.error { border-color: var(--bad); color: var(--bad); }
@@ -135,6 +142,42 @@
     <p class="readout" id="synthStatus"></p>
     <div class="knobs" id="knobs"></div>
     <p class="hint">To set a knob of the synth effect from your keyboard, click “Learn” next to it and move the knob, slider or wheel you want to use. Any control that sends values 0–127 works; one control sets one knob. The list shows the knobs of the effect in the current preset (KeySynth or KeyPoly); a knob both have, such as Level, is set on whichever of them is there. “Vib” and “Trm” are the two halves of the LFO knob: with the control at rest the LFO is off, at full travel the vibrato or tremolo is deepest – the way a mod wheel works on a hardware synth. Notes and the pitch wheel always play the Key knob – on KeyPoly the four Key knobs, one note each (the wheel bends ±<span id="bendRange"></span> semitones, see <code>bend_range</code> in config.yaml).</p>
+    <div class="arp">
+      <div class="arp-head">
+        <h3>Arpeggiator</h3>
+        <button type="button" id="arpOn" aria-pressed="false">Off</button>
+        <span class="readout" id="arpStatus"></span>
+      </div>
+      <div class="arp-grid">
+        <label>Mode<select data-arp="mode">
+          <option value="up">Up</option>
+          <option value="down">Down</option>
+          <option value="updown">Up and down</option>
+          <option value="played">As played</option>
+          <option value="random">Random</option>
+        </select></label>
+        <label>Rate<select data-arp="rate">
+          <option value="1/4">1/4</option>
+          <option value="1/8">1/8</option>
+          <option value="1/8T">1/8 triplet</option>
+          <option value="1/16">1/16</option>
+          <option value="1/16T">1/16 triplet</option>
+          <option value="1/32">1/32</option>
+        </select></label>
+        <label>Octaves<select data-arp="octaves">
+          <option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option>
+        </select></label>
+        <label>Gate %<input data-arp="gate" type="number" min="5" max="100" step="5" inputmode="numeric"></label>
+        <label>Clock<select data-arp="clock">
+          <option value="internal">Tempo</option>
+          <option value="midi">MIDI clock</option>
+        </select></label>
+        <label>Tempo BPM<input data-arp="tempo" type="number" min="40" max="300" step="1" inputmode="decimal"></label>
+        <label class="check"><input data-arp="latch" type="checkbox">Latch</label>
+      </div>
+      <div class="knobs" id="arpSwitch"></div>
+      <p class="hint">The arpeggiator plays the keys that are down one after another; on KeyPoly every note takes the next voice, so they ring into each other. “Latch” keeps a chord playing after you let go, until you play a new one. “Gate” is how much of a step a note sounds; at 100 % the notes are tied (with KeySynth’s Glide they slide). “MIDI clock” follows the clock arriving at the keyboard’s port, Start, Stop and Continue included – from a DAW, send it through the same port as the keyboard’s notes. “On/Off” can be learned for a button or pedal of the keyboard: on at values 64–127. The arpeggiator is off whenever the bridge starts.</p>
+    </div>
   </section>
 
   <section class="now">
@@ -239,6 +282,7 @@ let drafts = {};          // preset key → parameters with unsaved changes (als
 let shownPatch = null;
 let messageTimer = null;
 let knobSignature = "";   // what the keyboard-synth rows were last built from
+const ARP_NUMBERS = ["octaves", "gate", "tempo"];
 
 // Preset number as shown on the pedal ↔ key "bank/program"
 const keyOf = (number) => `${Math.floor((number - 1) / state.limits.per_bank)}/${(number - 1) % state.limits.per_bank}`;
@@ -356,36 +400,62 @@ function renderSynth() {
     + (synth.latency_ms == null ? "" : `  ·  note → confirmed ${synth.latency_ms} ms`);
   $("bendRange").textContent = synth.bend_range;
 
-  const signature = JSON.stringify([synth.knobs, synth.learning, synth.keyboard]);
+  renderArp(synth.arp);
+
+  const signature = JSON.stringify([synth.knobs, synth.learning, synth.keyboard, synth.arp.cc]);
   if (signature === knobSignature) return;      // rebuilding on every poll would swallow clicks
   knobSignature = signature;
-  $("knobs").replaceChildren(...synth.knobs.map((knob) => {
-    const waiting = synth.learning === knob.name;
-    const row = document.createElement("div");
-    row.className = waiting ? "knob waiting" : "knob";
-    const name = document.createElement("b");
-    name.textContent = knob.name;
-    if (knob.knob !== knob.name) row.title = `The ${knob.knob} knob from Off (control at rest) to full depth`;
-    const control = document.createElement("span");
-    control.textContent = waiting ? "Move a control…"
-      : knob.cc == null ? "not assigned" : knob.cc === 1 ? "Mod wheel" : `CC ${knob.cc}`;
-    const learn = document.createElement("button");
-    learn.type = "button";
-    learn.className = waiting ? "" : "learn-btn";
-    learn.textContent = waiting ? "Cancel" : "Learn";
-    learn.disabled = !waiting && !synth.keyboard;
-    learn.addEventListener("click", () => post("/api/synth",
-      waiting ? {action: "cancel"} : {action: "learn", knob: knob.name}));
-    row.append(name, control, learn);
-    if (knob.cc != null && !waiting) {
-      const clear = document.createElement("button");
-      clear.type = "button";
-      clear.textContent = "Clear";
-      clear.addEventListener("click", () => post("/api/synth", {action: "clear", knob: knob.name}));
-      row.append(clear);
-    }
-    return row;
-  }));
+  $("knobs").replaceChildren(...synth.knobs.map((knob) => controlRow(knob, synth)));
+  $("arpSwitch").replaceChildren(controlRow({name: "Arp", label: "On/Off", knob: "Arp", cc: synth.arp.cc}, synth));
+}
+
+// One row per thing a controller of the keyboard can be assigned to: name, controller, Learn, Clear
+function controlRow(knob, synth) {
+  const waiting = synth.learning === knob.name;
+  const row = document.createElement("div");
+  row.className = waiting ? "knob waiting" : "knob";
+  const name = document.createElement("b");
+  name.textContent = knob.label || knob.name;
+  if (knob.name === "Arp") row.title = "Switches the arpeggiator: on at values 64–127, off below";
+  else if (knob.knob !== knob.name) row.title = `The ${knob.knob} knob from Off (control at rest) to full depth`;
+  const control = document.createElement("span");
+  control.textContent = waiting ? "Move a control…"
+    : knob.cc == null ? "not assigned" : knob.cc === 1 ? "Mod wheel" : `CC ${knob.cc}`;
+  const learn = document.createElement("button");
+  learn.type = "button";
+  learn.className = waiting ? "" : "learn-btn";
+  learn.textContent = waiting ? "Cancel" : "Learn";
+  learn.disabled = !waiting && !synth.keyboard;
+  learn.addEventListener("click", () => post("/api/synth",
+    waiting ? {action: "cancel"} : {action: "learn", knob: knob.name}));
+  row.append(name, control, learn);
+  if (knob.cc != null && !waiting) {
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.textContent = "Clear";
+    clear.addEventListener("click", () => post("/api/synth", {action: "clear", knob: knob.name}));
+    row.append(clear);
+  }
+  return row;
+}
+
+// The arpeggiator: its switch, what it plays, and its settings (a field being edited is left alone)
+function renderArp(arp) {
+  $("arpOn").textContent = arp.on ? "On" : "Off";
+  $("arpOn").classList.toggle("primary", arp.on);
+  $("arpOn").setAttribute("aria-pressed", String(arp.on));
+  const clock = arp.clock !== "midi" ? ""
+    : arp.clock_bpm == null ? "  ·  no MIDI clock arriving"
+    : `  ·  MIDI clock ${arp.clock_bpm} BPM` + (arp.clock_running ? "" : ", stopped");
+  $("arpStatus").textContent = (!arp.on ? "Off – the keys play as usual"
+    : arp.note ? `Playing ${arp.note}` : "Waiting for keys") + clock;
+  for (const field of document.querySelectorAll("[data-arp]")) {
+    if (field === document.activeElement) continue;
+    const value = arp[field.dataset.arp];
+    if (field.type === "checkbox") field.checked = value;
+    else field.value = String(value);
+    if (field.dataset.arp === "tempo") field.disabled = arp.clock === "midi";
+  }
 }
 
 // Saved presets plus presets that so far exist only as an unsaved draft
@@ -555,6 +625,15 @@ $("addPreset").addEventListener("click", () => {
 });
 
 $("learn").addEventListener("click", () => post("/api/learn", {action: "start"}));
+$("arpOn").addEventListener("click", () => post("/api/arp", {on: !state.synth.arp.on}));
+for (const field of document.querySelectorAll("[data-arp]")) {
+  field.addEventListener("change", () => {
+    const name = field.dataset.arp;
+    const value = field.type === "checkbox" ? field.checked
+      : ARP_NUMBERS.includes(name) ? Number(field.value) : field.value;
+    post("/api/arp", {[name]: value});
+  });
+}
 $("learnCancel").addEventListener("click", () => post("/api/learn", {action: "cancel"}));
 $("learnStop").addEventListener("click", async () => {
   const key = state.patch && state.patch.key;

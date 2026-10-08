@@ -1,5 +1,6 @@
 """The bridge's interface in the browser: status, learning parameters, assignments per preset,
-export and import, and which controller of the keyboard sets which KeySynth knob.
+export and import, which controller of the keyboard sets which knob of the synth effect, and the
+arpeggiator.
 
 Runs as a small HTTP server in the same process as the bridge and is reachable from this
 computer only. The interface itself sends nothing to the pedal; it only changes the assignments.
@@ -82,6 +83,7 @@ def serve(bridge, settings: dict) -> str:
                     "/api/delete": lambda: bridge.delete_mapping(str(data.get("key"))),
                     "/api/import": lambda: bridge.import_data(data),
                     "/api/synth": lambda: bridge.synth_control(str(data.get("action")), data.get("knob")),
+                    "/api/arp": lambda: bridge.arp(data),
                 }
                 if self.path not in actions or not isinstance(data, dict):
                     self._json(404, {"error": "Not found."})

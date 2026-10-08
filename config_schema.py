@@ -8,6 +8,7 @@ carries everything the bridge needs:
     learned          learned ranges per preset: {"9/4": [{slot, param, min, max}, …]}
     approvals        {"backup_confirmed": timestamp, "messages": {message kind: timestamp}}
     controls         which controller of the keyboard sets what on the synth effect: {name: CC number}
+    arp              the arpeggiator's settings that are not the defaults (arpeggiator.py)
 
 It holds values only: never code, and never raw SysEx bytes. Messages are still built in
 zoom_sysex.py alone. export.py (on the computer where everything was set up) and bridge.py
@@ -21,6 +22,7 @@ from typing import Optional
 
 import yaml
 
+import arpeggiator
 import zoom_sysex as zs
 
 SCHEMA_VERSION = 1
@@ -46,7 +48,7 @@ SECTIONS = {
     "synth": {"keyboard", "channel", "effect_id", "poly_effect_id", "low_note", "high_note", "sustain",
               "bend_range"},
 }
-EXTRA = {"schema_version", "exported_at", "learned", "approvals", "controls", "mappings"}
+EXTRA = {"schema_version", "exported_at", "learned", "approvals", "controls", "mappings", "arp"}
 # A message, not a name or a value: four or more two-digit hex numbers in a row ("F0 52 00 6E"),
 # or one run of hex from F0 to F7. Dates and times do not match (their numbers are joined by - and :).
 LOOKS_LIKE_BYTES = re.compile(r"(?:\b[0-9A-Fa-f]{2}\b[\s,]+){3,}\b[0-9A-Fa-f]{2}\b|\b[Ff]0(?:[0-9A-Fa-f]{2})+[Ff]7\b")
@@ -242,13 +244,15 @@ def validate(data) -> list:
         add("controls must list a controller number per name.")
     else:
         for name, number in controls.items():
-            if name not in zs.ALL_CONTROLS:
+            if name not in zs.ALL_CONTROLS and name != arpeggiator.SWITCH:
                 add(f"controls: “{name}” is nothing a controller can set on KeySynth or KeyPoly.")
             elif not _is_int(number, 0, 127) or number in RESERVED_CONTROLS:
                 add(f"controls: {name} needs a controller number from 0 to 127 that is not reserved.")
         numbers = [number for number in controls.values() if isinstance(number, int)]
         if len(set(numbers)) < len(numbers):
             add("controls: one controller is assigned twice.")
+    for problem in arpeggiator.problems(data.get("arp", {})):
+        add(problem)
     return problems
 
 
@@ -280,9 +284,11 @@ class Measurements:
         return list(self.patches.get(f"{patch[0]}/{patch[1]}", {}).values())
 
 
-def build(config: dict, learned_patches: dict, approvals: dict, controls: dict, exported_at: str) -> dict:
+def build(config: dict, learned_patches: dict, approvals: dict, controls: dict, exported_at: str,
+          arp: Optional[dict] = None) -> dict:
     """The settings file made from what the computer keeps in config.yaml, measurements.json,
-    approvals.json and controls.json. Of the learned ranges only the limits go in."""
+    approvals.json and controls.json. Of the learned ranges only the limits go in, of the
+    arpeggiator's settings only those that are not the defaults."""
     settings = {"schema_version": SCHEMA_VERSION, "exported_at": exported_at}
     settings.update({key: value for key, value in config.items() if key != "mappings"})
     settings["mappings"] = config.get("mappings") or {}
@@ -293,6 +299,8 @@ def build(config: dict, learned_patches: dict, approvals: dict, controls: dict, 
     settings["approvals"] = {"backup_confirmed": approvals.get("backup_confirmed"),
                              "messages": dict(approvals.get("messages") or {})}
     settings["controls"] = dict(controls)
+    if arp and arpeggiator.changed(arp):
+        settings["arp"] = arpeggiator.changed(arp)
     return settings
 
 

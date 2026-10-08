@@ -420,3 +420,36 @@ Tonhöhe für die Bend-Glättung. Offen war die Bridge: Sie konnte die vier Stim
     wiederholt die Noten; dann brauchen die Writes eines Akkords einen kleinen Abstand.
   - Zeit Taste → Ack pro Stimme (die Konsole nennt jetzt `Key1` … `Key4`).
   - Last mit vier Dreiecken, Bend eines Vierklangs, Stimmenklau bei gehaltenem Sustain-Pedal.
+
+## Arpeggiator, 2026-10-08 (Wunsch des Nutzers: „Erst Arp, dann Step“; ohne Pedal)
+
+- **Aufbau:** `arpeggiator.py` enthält nur die Notenlogik und die Einstellungen; die Uhr läuft in
+  `bridge.py` (`Session._arp_step`, `_arp_tick`, `_on_clock`). Ist der Arpeggiator an, bestimmt er statt der
+  Tasten, was klingt (`Session._sounding`); Stimmenverteilung, Bend und Wiederholungen laufen über
+  denselben Weg wie beim Spielen von Hand. Auf KeyPoly nimmt jede Note die nächste freie Stimme, die
+  Releases klingen also ineinander.
+- **Modi:** Up, Down, Up/Down (Wendetöne nicht doppelt), As played (Reihenfolge des Anschlags), Random (nie
+  zweimal derselbe Ton). Up und Down machen beim nächsten Ton über bzw. unter dem zuletzt gespielten weiter;
+  ein Akkord, dessen Tasten ein paar Millisekunden nacheinander ankommen, fängt so nicht von vorn an.
+- **Eigenes Tempo:** 40–300 BPM, die erste Taste startet sofort (Key-Sync), danach driftfrei im Raster.
+  Ohne Tasten (und ohne Latch) ruht er bis zur nächsten Taste.
+- **MIDI-Clock (Wunsch: beides, wenn nicht zu umständlich):** vom Keyboard-Port, 24 pro Viertel. Schritte
+  zählen ab Start, bleiben also auf dem Takt; Stop schaltet stumm und setzt das Muster zurück, Continue
+  macht weiter; Clock während Stop wird nur zur Tempomessung genutzt. Bleibt die Clock 0,5 s aus, verstummt
+  er. Ein eigener Port nur für die Clock wäre mehr Aufwand (dritter optionaler Eingang mit Hotplug); eine
+  DAW schickt die Clock deshalb über denselben virtuellen Port wie die Noten des Keyboards.
+- **Gate:** Gate-off und nächste Note auf demselben Key-Regler liegen immer mindestens `min_interval_ms`
+  (10 ms) auseinander, ebenso Note und ihr Gate-off (bekannt: von zwei Nachrichten im Abstand von 1 ms an
+  denselben Parameter bestätigt das Pedal nur die zweite). Gate 100 % bindet die Töne.
+- **Ein/Aus** ist kein gespeicherter Wert: Er ist nach jedem Start aus. Schaltbar in der Oberfläche und über
+  einen anlernbaren Controller „Arp“ (ab 64 an). Die übrigen Einstellungen stehen in `controls.json` unter
+  `arp` (nur was vom Standard abweicht; alte Dateien ohne `arp` gelten weiter) und gehen mit `export.py` auf
+  den Pi.
+- **Mehrere Writes kurz nacheinander (Beobachtung des Nutzers):** Das Log im Verlauf des Repositorys
+  (06.10., nur Expression) enthält keine zwei Writes an verschiedene Parameter unter 9 ms Abstand und taugt
+  dafür nicht. Dass Keyboard, Expression, Pitch-Wheel, Mod-Wheel und Regler gleichzeitig ohne Auffälligkeiten
+  liefen, ist der bessere Beleg: Noten gehen sofort raus, landen also regelmäßig wenige Millisekunden neben
+  einem Expression-Write.
+- Tests: `tests/test_arp.py`. Am Pedal noch zu prüfen: Timing nach Gehör bei 1/16 und 1/32, Last bei hohem
+  Tempo (1/32 bei 300 BPM wären 80 Nachrichten pro Sekunde, mehr als bisher getestet), MIDI-Clock aus einer
+  DAW über IAC.

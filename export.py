@@ -6,11 +6,11 @@
   python export.py --check        only say whether the settings are complete and valid
 
 The Pi has no screen, so everything is set up on this computer: ports, assignments, learned
-ranges, approvals and the keyboard's controllers. This script gathers them from config.yaml,
-measurements.json, approvals.json and controls.json into one file, checks it with the same rules
-the Pi applies, and writes it as expression-bridge.yaml. A file that is already there is kept as
-expression-bridge.prev.yaml; the Pi falls back to it if the new one turns out to be unusable.
-The file holds values only, no code and no SysEx bytes.
+ranges, approvals, the keyboard's controllers and the arpeggiator. This script gathers them from
+config.yaml, measurements.json, approvals.json and controls.json into one file, checks it with the
+same rules the Pi applies, and writes it as expression-bridge.yaml. A file that is already there is
+kept as expression-bridge.prev.yaml; the Pi falls back to it if the new one turns out to be
+unusable. The file holds values only, no code and no SysEx bytes.
 """
 from __future__ import annotations
 
@@ -41,8 +41,9 @@ def gather() -> dict:
         approvals.update(json.loads(bridge.APPROVALS.read_text(encoding="utf-8")))
     has_keyboard = bool((config.get("synth") or {}).get("keyboard"))
     controls = bridge.read_controls(bridge.CONTROLS) if has_keyboard else {}
+    arp = bridge.read_arp(bridge.CONTROLS) if has_keyboard else None
     return cs.build(config, zs.Measurements(bridge.MEASUREMENTS).patches, approvals, controls,
-                    time.strftime("%Y-%m-%d %H:%M:%S"))
+                    time.strftime("%Y-%m-%d %H:%M:%S"), arp)
 
 
 def write(settings: dict, folder: Path) -> Path:

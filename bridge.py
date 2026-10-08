@@ -3,7 +3,9 @@
 Optionally a MIDI keyboard plays a synth effect on the pedal (section `synth:` in config.yaml):
 KeySynth with one voice or KeyPoly with four. Notes and pitch wheel become their Key knobs (on
 KeyPoly the bridge gives each note one of the four), the mod wheel and any other controller can be
-assigned to their other knobs (learned in the interface, kept in controls.json).
+assigned to their other knobs (learned in the interface, kept in controls.json). An arpeggiator
+plays the keys that are down one after another, at its own tempo or to the MIDI clock arriving at
+the keyboard's port.
 
   python bridge.py           bridge + interface in the browser (the address is printed on start)
   python bridge.py --open    also opens the interface in the browser
@@ -36,6 +38,7 @@ from typing import NamedTuple, Optional
 import mido
 import yaml
 
+import arpeggiator
 import config_schema as cs
 import status_led
 import zoom_sysex as zs
@@ -48,6 +51,7 @@ CONTROLS = ROOT / "controls.json"
 
 REQUIRED_KINDS = ("identity_request", "edit_enable", "edit_disable", "set_param", "query_program")
 IGNORED_TYPES = ("clock", "active_sensing")
+CLOCK_TYPES = ("clock", "start", "stop", "continue")   # from the keyboard's port: they drive the arpeggiator
 RETRY_SECONDS = 2.0        # time between connection attempts
 PORT_CHECK_SECONDS = 1.0   # how often to check that both devices are still there
 REPORT_SECONDS = 5.0       # time between statistics lines while sending
@@ -73,6 +77,7 @@ KEY_TROUBLE_SECONDS = 5.0  # while notes stay unconfirmed: warn and look for the
 EDIT_REENABLE_SECONDS = 2.0  # while nothing is confirmed: switch edit mode on again this often at most
 NOTE_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 MAX_BEND_RANGE = 12        # semitones the pitch wheel may be set to bend each way
+CLOCK_TIMEOUT = 0.5        # no MIDI clock for this long: the clock has stopped, the arpeggiator falls silent
 # Controllers that cannot be assigned to a knob: bank select, sustain, the channel mode messages
 RESERVED_CONTROLS = (0, 32, 64) + tuple(range(120, 128))
 
@@ -161,8 +166,9 @@ def synth_effects(synth: Optional[dict]) -> dict:
 
 
 def read_controls(path: Path) -> dict:
-    """Which controller of the keyboard sets what on the synth: {name in zs.ALL_CONTROLS: CC number}.
-    No file yet: nothing is assigned. Anything in the file that cannot be right is dropped."""
+    """Which controller of the keyboard sets what on the synth: {name in zs.ALL_CONTROLS, or the
+    arpeggiator's switch: CC number}. No file yet: nothing is assigned. Anything in the file that
+    cannot be right is dropped."""
     if not path.exists():
         return {}
     try:
@@ -171,11 +177,23 @@ def read_controls(path: Path) -> dict:
         sys.exit(f"{path.name} is damaged – delete it to start again without assignments.")
     controls: dict = {}
     for name, number in stored.items() if isinstance(stored, dict) else ():
-        if (name in zs.ALL_CONTROLS and isinstance(number, int) and not isinstance(number, bool)
+        if ((name in zs.ALL_CONTROLS or name == arpeggiator.SWITCH) and isinstance(number, int)
+                and not isinstance(number, bool)
                 and 0 <= number <= 127 and number not in RESERVED_CONTROLS
                 and number not in controls.values()):
             controls[name] = number
     return controls
+
+
+def read_arp(path: Path) -> dict:
+    """The arpeggiator's settings, kept in the same file as the controllers (only what differs from
+    the defaults is stored). A setting that cannot be right takes its default."""
+    if not path.exists():
+        return arpeggiator.read({})
+    try:
+        return arpeggiator.read(json.loads(path.read_text(encoding="utf-8")).get("arp"))
+    except (OSError, ValueError, AttributeError):
+        sys.exit(f"{path.name} is damaged – delete it to start again without assignments.")
 
 
 class Keys:
@@ -188,10 +206,14 @@ class Keys:
         self.held: list = []          # notes that are down, oldest first
         self.sustained: list = []     # notes released while the sustain pedal was down
         self.pedal_down = False
+        self.presses = 0
+        self.pressed_as: dict = {}    # note → the how-manyth key press it was
 
     def note_on(self, note: int) -> None:
         self.note_off(note, sustain=False)
         self.held.append(note)
+        self.presses += 1
+        self.pressed_as[note] = self.presses
 
     def note_off(self, note: int, sustain: bool = True) -> None:
         if note in self.sustained:
@@ -220,6 +242,10 @@ class Keys:
         """The MIDI notes that should sound on so many voices, the most important first: keys that
         are down before notes the sustain pedal holds, the latest first in both."""
         return (self.held[::-1] + self.sustained[::-1])[:voices]
+
+    def played(self) -> list:
+        """Every note that is down or held by the sustain pedal, in the order the keys were pressed."""
+        return sorted(self.held + self.sustained, key=lambda note: self.pressed_as.get(note, 0))
 
 
 class Voice:
@@ -278,7 +304,7 @@ class KeySent(NamedTuple):
     time: float       # arrival of the keyboard message that caused it
     send_time: float
     attempt: int      # 0 for the first try
-    bend: bool        # a step of the pitch wheel, not a note
+    quiet: bool       # a step of the pitch wheel or of the arpeggiator: not printed
 
 
 class Target:
@@ -356,6 +382,14 @@ class Session:
         self.synth_known = False                            # a patch dump has told us whether it is there
         self.voices: list = []                              # one Voice per Key knob of the effect
         self.bend_turn = -1                                 # the voice that followed the pitch wheel last
+        # The arpeggiator: on (bridge.arp_on), it decides what sounds instead of the keys
+        self.arp = arpeggiator.Arpeggiator(bridge.arp_settings, self.synth["high_note"] if self.synth else 127)
+        self.arp_note: Optional[int] = None                 # the note it sounds now
+        self.next_step: Optional[float] = None              # its own clock: when the next step is due
+        self.gate_off_at: Optional[float] = None            # when the note it sounds ends
+        self.ticks = 0                                      # MIDI clocks since Start
+        self.clock_running = True                           # False from Stop until Start or Continue
+        self.tick_times: deque = deque(maxlen=25)           # arrival of the last MIDI clocks, for its tempo
         self.key_misses = 0
         self.key_totals = {"sent": 0, "acked": 0, "missed": 0, "overtaken": 0}
         self.key_latencies: deque = deque(maxlen=50)
@@ -409,6 +443,7 @@ class Session:
             if self.edit_enabled:
                 if any(voice.key_sent for voice in self.voices):    # never leave a note hanging
                     self.keys.clear()
+                    self._arp_silence()
                     self._play(time.monotonic())
                     self._wait(lambda raw: not any(voice.awaiting for voice in self.voices), 0.3)
                 self.sender.send(zs.build_edit_disable(self.device_id))
@@ -438,6 +473,8 @@ class Session:
         if self.keyboard is not None:           # notes first: they are never delayed or merged
             for message in self.keyboard.iter_pending():
                 self._on_keyboard(message, now)
+        if self.synth is not None:
+            self._arp_tick(now)
         if self.chocolate is not None:
             for message in self.chocolate.iter_pending():
                 self._on_chocolate(message, now)
@@ -476,6 +513,8 @@ class Session:
             self._drop("keyboard")
             self.keys.clear()
             self.bend = 0.0
+            self.arp.clear()
+            self._arp_silence()
             self._play(time.monotonic())        # gate off
         if self.chocolate_name is None and self.keyboard_name is None:
             raise Disconnected("no controller left")
@@ -526,6 +565,9 @@ class Session:
 
     def _on_keyboard(self, message, now: float) -> None:
         synth = self.synth
+        if message.type in CLOCK_TYPES:
+            self._on_clock(message.type, now)
+            return
         if message.type in IGNORED_TYPES or not hasattr(message, "channel"):
             return
         if synth["channel"] and message.channel + 1 != synth["channel"]:
@@ -534,7 +576,12 @@ class Session:
             if not synth["low_note"] <= message.note <= synth["high_note"]:
                 return
             if message.type == "note_on" and message.velocity > 0:
+                alone = not self.keys.held
                 self.keys.note_on(message.note)
+                self.arp.pressed(message.note, alone)
+                if self.bridge.arp_on and self.next_step is None and self._arp_clock() == "internal":
+                    self._arp_step(now, now)        # an arpeggio starts with the key, not on the next beat
+                    return
             else:                                   # note on with velocity 0 is a note off
                 self.keys.note_off(message.note)
         elif message.type == "pitchwheel":
@@ -545,6 +592,8 @@ class Session:
             self.keys.pedal(message.value >= 64)
         elif message.type == "control_change" and message.control in (120, 123):
             self.keys.clear()                       # all sound off, all notes off
+            self.arp.clear()
+            self._arp_silence()
         elif message.type == "control_change":
             self._on_control(message.control, message.value, now)
             return
@@ -557,6 +606,9 @@ class Session:
         assigned to a knob, otherwise it sets the knob it is assigned to."""
         if self.bridge.control_learning is not None:
             self.bridge.learned_control(number)
+            return
+        if number == self.bridge.controls.get(arpeggiator.SWITCH):
+            self.bridge.switch_arp(value >= 64)     # like the sustain pedal: on from 64
             return
         target, name = self.controls.get(number, (None, None))
         if target is not None and not (target.stopped or target.blocked):
@@ -572,7 +624,7 @@ class Session:
         played it, otherwise the one that has been free longest (its release has faded most).
         With more notes than voices the oldest gives its voice up and gets it back when a newer
         one is released, as a single voice does."""
-        wanted = self.keys.notes(len(self.voices))
+        wanted = self._sounding()
         for voice in self.voices:
             if voice.note is not None and voice.note not in wanted:
                 voice.note, voice.freed = None, now
@@ -583,9 +635,10 @@ class Session:
                             key=lambda voice: (voice.last_note != note, voice.freed))
                 voice.note = voice.last_note = note
 
-    def _play(self, now: float) -> None:
-        """Brings the pedal's Key knobs in line with the keys that are down. A note goes out at
-        once: it is not spaced, delayed or merged, only an unchanged value is skipped."""
+    def _play(self, now: float, quiet: bool = False) -> None:
+        """Brings the pedal's Key knobs in line with the keys that are down (or with the
+        arpeggiator). A note goes out at once: it is not spaced, delayed or merged, only an
+        unchanged value is skipped. quiet: not printed (the arpeggiator's notes)."""
         if self.synth_slot is None:
             if self.keys.note is not None:          # the effect may have been added just now
                 self._look_for_synth(now)
@@ -598,7 +651,7 @@ class Session:
                 continue                            # never played and not known: left as it is until it is needed
             key = self._wanted_key(voice)
             if key != voice.key_sent:
-                self._send_key(voice, key, now)
+                self._send_key(voice, key, now, quiet=quiet)
             voice.note_sent = voice.note
 
     def _bend_step(self, now: float) -> bool:
@@ -615,17 +668,17 @@ class Session:
             if wanted == voice.key_sent:
                 continue
             step = max(-zs.KEY_BEND_STEP, min(zs.KEY_BEND_STEP, wanted - voice.key_sent))
-            self._send_key(voice, voice.key_sent + step, now, bend=True)
+            self._send_key(voice, voice.key_sent + step, now, quiet=True)
             self.bend_turn = voice.index
             return True
         return False
 
     def _send_key(self, voice: Voice, key: int, now: float, played: Optional[float] = None,
-                  attempt: int = 0, bend: bool = False) -> None:
+                  attempt: int = 0, quiet: bool = False) -> None:
         self.sender.send(zs.build_set_key(self.device_id, self.synth_slot, key, voice.index))
         voice.key_sent = key
         self.last_send = time.monotonic()           # every other value keeps its distance from a note
-        voice.awaiting.append(KeySent(key, now if played is None else played, now, attempt, bend))
+        voice.awaiting.append(KeySent(key, now if played is None else played, now, attempt, quiet))
         self.key_totals["sent"] += 1
 
     def _on_key_ack(self, voice: Voice, value: int, now: float) -> None:
@@ -642,8 +695,8 @@ class Session:
         self.key_misses = 0
         self.key_totals["acked"] += 1
         self.key_latencies.append(now - sent.time)
-        if sent.bend or HEADLESS:
-            return                                  # a moving wheel would flood the terminal
+        if sent.quiet or HEADLESS:
+            return                                  # a moving wheel or an arpeggio would flood the terminal
         if value:
             note, cents = zs.key_pitch(value)
             what = f"{note_name(note):>4} ({note:3d})" + (f" {cents:+d} c" if cents else "")
@@ -664,7 +717,7 @@ class Session:
                 and sent.attempt < KEY_RETRIES):
             # The last note, the end of a bend or the gate-off must not get lost. Repeating is
             # harmless: the pedal ignores a value it already holds.
-            self._send_key(voice, sent.value, now, played=sent.time, attempt=sent.attempt + 1, bend=sent.bend)
+            self._send_key(voice, sent.value, now, played=sent.time, attempt=sent.attempt + 1, quiet=sent.quiet)
         if sent.attempt:
             return          # counted once, with the first try
         self.key_totals["missed"] += 1
@@ -728,8 +781,110 @@ class Session:
                 say(f"{effect.name} is effect {slot + 1} – the keyboard plays it{voices}")
         if changed:
             self.refresh()
-        if self.keys.note is not None:
+        if self.keys.note is not None or self.arp_note is not None:   # also: keep looking while a key is down
             self._play(now)
+
+    # --- The arpeggiator ---
+
+    def _sounding(self) -> list:
+        """The notes that should sound now, the most important first: the arpeggiator's one note
+        while it is on, otherwise the keys that are down."""
+        if self.bridge.arp_on:
+            return [] if self.arp_note is None else [self.arp_note]
+        return self.keys.notes(len(self.voices))
+
+    def _arp_clock(self) -> str:
+        return self.bridge.arp_settings["clock"]
+
+    def _step_length(self) -> float:
+        """Seconds per step: from the tempo of the MIDI clock while it runs, otherwise the set tempo."""
+        clocks = arpeggiator.RATES[self.bridge.arp_settings["rate"]]
+        if self._arp_clock() == "midi" and len(self.tick_times) > 1 and self.tick_times[-1] > self.tick_times[0]:
+            return (self.tick_times[-1] - self.tick_times[0]) / (len(self.tick_times) - 1) * clocks
+        return 60 / self.bridge.arp_settings["tempo"] * clocks / 24
+
+    def _arp_step(self, now: float, due: float) -> None:
+        """One step: the next note of the chord, with a gate-off scheduled for it. With nothing to
+        play the arpeggiator rests; on its own clock it starts again with the next key."""
+        note = self.arp.next_note(self.keys.played())
+        length = self._step_length()
+        self.next_step = None
+        if note is not None and self._arp_clock() == "internal":
+            # From when the step was due, so the tempo does not drift; after a stall, from now.
+            self.next_step = due + length if due + length > now else now + length
+        self.arp_note, self.gate_off_at = note, None
+        # A gate-off and the next note on the same Key knob keep the minimum interval apart:
+        # of two messages 1 ms apart the pedal confirms only the second.
+        gate = self.bridge.arp_settings["gate"]
+        if note is not None and gate < 100 and length >= 2 * self.min_interval:
+            self.gate_off_at = now + max(self.min_interval, min(length * gate / 100, length - self.min_interval))
+        self._play(now, quiet=True)
+
+    def _arp_tick(self, now: float) -> None:
+        """Gate-offs and steps that are due (its own clock); silence once the MIDI clock has stopped."""
+        if self.gate_off_at is not None and now >= self.gate_off_at:
+            self.gate_off_at, self.arp_note = None, None
+            self._play(now, quiet=True)
+        if self.next_step is not None and now >= self.next_step:
+            if self.bridge.arp_on and self._arp_clock() == "internal":
+                self._arp_step(now, self.next_step)
+            else:
+                self.next_step = None
+        if (self.arp_note is not None and self._arp_clock() == "midi"
+                and (not self.tick_times or now - self.tick_times[-1] > CLOCK_TIMEOUT)):
+            self._arp_silence()
+            self._play(now, quiet=True)
+
+    def _on_clock(self, kind: str, now: float) -> None:
+        """MIDI clock (24 per beat) and its Start, Stop and Continue. On the MIDI clock the
+        arpeggiator steps every so many clocks, counted from Start, so it stays on the beat."""
+        if kind == "start":
+            self.clock_running, self.ticks = True, 0
+            return
+        if kind == "continue":
+            self.clock_running = True
+            return
+        if kind == "stop":
+            self.clock_running = False
+            if self._arp_clock() == "midi":
+                self.arp.reset()                     # Start begins at the first note again
+                if self.arp_note is not None:
+                    self._arp_silence()
+                    self._play(now, quiet=True)
+            return
+        if self.tick_times and now - self.tick_times[-1] > CLOCK_TIMEOUT:
+            self.tick_times.clear()                  # its tempo is measured afresh
+        self.tick_times.append(now)
+        if not self.clock_running:
+            return
+        if (self.bridge.arp_on and self._arp_clock() == "midi"
+                and self.ticks % arpeggiator.RATES[self.bridge.arp_settings["rate"]] == 0):
+            self._arp_step(now, now)
+        self.ticks += 1
+
+    def _arp_silence(self) -> None:
+        """No arpeggiator note any more and none planned; _play then closes the gate."""
+        self.arp_note = self.gate_off_at = self.next_step = None
+
+    def switch_arp(self, now: float) -> None:
+        """The arpeggiator was switched on or off, or its settings changed: it starts afresh. On
+        its own clock it starts at once with the keys that are down; off, they sound as usual."""
+        self._arp_silence()
+        self.arp.reset()
+        if self.bridge.arp_on:
+            self.arp.latched = self.keys.played()     # Latch keeps what is down now, not an older chord
+            if self._arp_clock() == "internal" and self.keys.played():
+                self._arp_step(now, now)
+                return
+        self._play(now)
+
+    def arp_state(self) -> dict:
+        """For the interface: what it plays, and the tempo of the MIDI clock arriving."""
+        bpm, span = None, (self.tick_times[-1] - self.tick_times[0]) if self.tick_times else 0
+        if span > 0 and time.monotonic() - self.tick_times[-1] <= CLOCK_TIMEOUT:
+            bpm = round(60 * (len(self.tick_times) - 1) / (24 * span), 1)
+        return {"note": None if self.arp_note is None else note_name(self.arp_note), "clock_bpm": bpm,
+                "clock_running": self.clock_running}
 
     def _accept(self, value: int) -> bool:
         """Deadband: ignore small changes, but always let the end stops through."""
@@ -983,8 +1138,11 @@ class Bridge:
         if self.cfg["zoom"]["device_id"] is None or (self.cfg["expression"]["cc"] is None and not keyboard_only):
             sys.exit("config.yaml is incomplete – see “First-time setup” in README.md.")
         self.controls: dict = {}                      # what a keyboard controller sets → CC number
+        self.arp_settings = arpeggiator.read({})      # changed in place, the session's arpeggiator shares it
         if self.synth:
             self.controls = dict(settings.get("controls") or {}) if self.fixed else read_controls(CONTROLS)
+            self.arp_settings.update(arpeggiator.read(settings.get("arp")) if self.fixed else read_arp(CONTROLS))
+        self.arp_on = False                           # live, never stored: the bridge starts with it off
         self.control_learning: Optional[str] = None   # the knob waiting for a controller to be moved
 
         self.mappings: dict = {}   # (bank, program) → up to MAX_TARGETS mappings
@@ -1137,6 +1295,9 @@ class Bridge:
                 "knobs": [{"name": name, "knob": knob, "rest": rest, "full": full, "cc": self.controls.get(name)}
                           for name, (knob, rest, full) in (effect.controls if effect else zs.ALL_CONTROLS).items()],
                 "learning": self.control_learning,
+                "arp": dict(self.arp_settings, on=self.arp_on, cc=self.controls.get(arpeggiator.SWITCH),
+                            **(session.arp_state() if session else {"note": None, "clock_bpm": None,
+                                                                    "clock_running": True})),
                 "totals": dict(session.key_totals) if session else None,
                 "latency_ms": round(statistics.median(1000 * seconds for seconds in session.key_latencies), 1)
                 if session and session.key_latencies else None,
@@ -1210,7 +1371,7 @@ class Bridge:
         if action == "cancel":
             self.control_learning = None
             return
-        if not isinstance(knob, str) or knob not in zs.ALL_CONTROLS:   # anything can arrive over HTTP
+        if not isinstance(knob, str) or not (knob in zs.ALL_CONTROLS or knob == arpeggiator.SWITCH):   # anything can arrive over HTTP
             raise UserError("Unknown knob.")
         if action == "clear":
             self.control_learning = None
@@ -1233,6 +1394,9 @@ class Bridge:
             del self.controls[other]              # one controller sets one thing
         self.controls[knob] = number
         self._store_controls()
+        if knob == arpeggiator.SWITCH:
+            say(f"Arpeggiator: controller {number} now switches it on and off")
+            return
         effect = self.session.synth_effect if self.session else None
         owner = effect.name if effect and knob in effect.controls else "Keyboard synth"
         say(f"{owner}: controller {number} now sets {knob}")
@@ -1242,9 +1406,40 @@ class Bridge:
             raise UserError("The settings come from a settings file; change them on the computer "
                             "they were exported from.")
 
+    def switch_arp(self, on: bool) -> None:
+        """The arpeggiator on or off, from the interface or a controller of the keyboard."""
+        if on != self.arp_on:
+            self.arp_on = on
+            say(f"Arpeggiator {'on' if on else 'off'}")
+            if self.session is not None:
+                self.session.switch_arp(time.monotonic())
+
+    def arp(self, data: dict) -> None:
+        """From the interface: switch the arpeggiator ("on": true or false) and change its settings."""
+        if self.synth is None:
+            raise UserError("No keyboard synth is set up in config.yaml.")
+        changes = {key: value for key, value in data.items() if key != "on"}
+        if "on" in data and not isinstance(data["on"], bool):
+            raise UserError("on must be true or false.")
+        if changes:
+            self._changeable()
+            problems = arpeggiator.problems(changes)
+            if problems:
+                raise UserError(" ".join(problem.removeprefix("arp: ") for problem in problems))
+            self.arp_settings.update(changes)
+            self._store_controls()
+        if "on" in data and data["on"] != self.arp_on:
+            self.switch_arp(data["on"])
+        elif changes and self.arp_on and self.session is not None:
+            self.session.switch_arp(time.monotonic())   # it goes on with the new settings
+
     def _store_controls(self) -> None:
+        """Writes controls.json: the controllers, and the arpeggiator's settings that are not the defaults."""
         self._changeable()
-        CONTROLS.write_text(json.dumps({"controls": self.controls}, indent=2) + "\n", encoding="utf-8")
+        stored = {"controls": self.controls}
+        if arpeggiator.changed(self.arp_settings):
+            stored["arp"] = arpeggiator.changed(self.arp_settings)
+        CONTROLS.write_text(json.dumps(stored, indent=2) + "\n", encoding="utf-8")
         if self.session is not None:
             self.session.refresh()
 
