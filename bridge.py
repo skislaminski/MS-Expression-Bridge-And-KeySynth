@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Expression Bridge: CC from the Chocolate Plus → parameter SysEx to the MS-60B+, with a web UI.
-Optionally a MIDI keyboard plays the KeySynth effect on the pedal (section `synth:` in config.yaml):
-notes and pitch wheel become its Key knob, the mod wheel and any other controller can be assigned
-to its other knobs (learned in the interface, kept in controls.json).
+Optionally a MIDI keyboard plays a synth effect on the pedal (section `synth:` in config.yaml):
+KeySynth with one voice or KeyPoly with four. Notes and pitch wheel become their Key knobs (on
+KeyPoly the bridge gives each note one of the four), the mod wheel and any other controller can be
+assigned to their other knobs (learned in the interface, kept in controls.json).
 
   python bridge.py           bridge + interface in the browser (the address is printed on start)
   python bridge.py --open    also opens the interface in the browser
@@ -64,7 +65,7 @@ UNLEARNED_MAX = 0x3FFF     # value limit for a parameter whose range has not bee
 UNCONFIRMED_HINT = 3       # misses in a row before the interface flags a parameter
 UNCONFIRMED_LIMIT = 5      # misses before sending stops for a parameter the pedal never confirmed
 EXPORT_FORMAT = "expression-bridge/1"
-SYNTH_QUERY_SECONDS = 1.0  # while looking for the KeySynth effect: at most one patch query per second
+SYNTH_QUERY_SECONDS = 1.0  # while looking for the synth effect: at most one patch query per second
 KEY_MISSES_BEFORE_QUERY = 3  # unconfirmed notes before the bridge looks where the effect is now
 KEY_ACK_TIMEOUT = 0.06     # a note is confirmed after about 10 ms (slowest seen: 20 ms)
 KEY_RETRIES = 3            # how often the last note or the gate-off is repeated while unconfirmed
@@ -124,31 +125,43 @@ def read_synth(cfg: dict) -> Optional[dict]:
     section = cfg.get("synth")
     if not section or not section.get("keyboard"):
         return None
-    unknown = set(section) - {"keyboard", "channel", "effect_id", "low_note", "high_note", "sustain",
-                              "bend_range"}
+    unknown = set(section) - {"keyboard", "channel", "effect_id", "poly_effect_id", "low_note", "high_note",
+                              "sustain", "bend_range"}
     if unknown:
         sys.exit(f"config.yaml, synth: unknown setting {', '.join(sorted(unknown))}")
+    effect_id = lambda name: None if section.get(name) is None else int(section[name])
     try:
         synth = {"keyboard": str(section["keyboard"]), "channel": int(section.get("channel", 0)),
-                 "effect_id": int(section["effect_id"]), "low_note": int(section.get("low_note", 0)),
+                 "effect_id": effect_id("effect_id"), "poly_effect_id": effect_id("poly_effect_id"),
+                 "low_note": int(section.get("low_note", 0)),
                  "high_note": int(section.get("high_note", 127)), "sustain": bool(section.get("sustain", True)),
                  "bend_range": float(section.get("bend_range", 2))}
-    except (KeyError, TypeError, ValueError):
-        sys.exit("config.yaml, synth: effect_id is missing or a value is not a number.")
-    if not (0 <= synth["channel"] <= 16 and 0 < synth["effect_id"] <= 0xFFFFFFFF
+    except (TypeError, ValueError):
+        sys.exit("config.yaml, synth: a value is not a number.")
+    ids = [synth[name] for name in ("effect_id", "poly_effect_id") if synth[name] is not None]
+    if not ids:
+        sys.exit("config.yaml, synth: effect_id is missing (the id of KeySynth; poly_effect_id is that of KeyPoly).")
+    if not (0 <= synth["channel"] <= 16 and all(0 < number <= 0xFFFFFFFF for number in ids)
+            and len(set(ids)) == len(ids)
             and 0 <= synth["low_note"] <= synth["high_note"] <= 127
             and 0 <= synth["bend_range"] <= MAX_BEND_RANGE):
         sys.exit("config.yaml, synth: channel must be 0–16 (0 = any), notes 0–127 with "
                  f"low_note ≤ high_note, bend_range 0–{MAX_BEND_RANGE} semitones, effect_id the id "
-                 "of the KeySynth effect.")
-    # The effect's Key knob reaches C0 to D#8; notes outside that are not played.
+                 "of the KeySynth effect and poly_effect_id that of KeyPoly (two different ids).")
+    # The effects' Key knobs reach C0 to D#8; notes outside that are not played.
     synth["low_note"] = max(synth["low_note"], zs.KEY_LOW_NOTE)
     synth["high_note"] = min(synth["high_note"], zs.KEY_HIGH_NOTE)
     return synth
 
 
+def synth_effects(synth: Optional[dict]) -> dict:
+    """The synth effects the keyboard plays, by their id on the pedal: {effect id: zs.SynthEffect}."""
+    return {synth[name]: effect for name, effect in (("effect_id", zs.KEYSYNTH), ("poly_effect_id", zs.KEYPOLY))
+            if synth and synth[name] is not None}
+
+
 def read_controls(path: Path) -> dict:
-    """Which controller of the keyboard sets what on the KeySynth: {name in zs.SYNTH_CONTROLS: CC number}.
+    """Which controller of the keyboard sets what on the synth: {name in zs.ALL_CONTROLS: CC number}.
     No file yet: nothing is assigned. Anything in the file that cannot be right is dropped."""
     if not path.exists():
         return {}
@@ -158,7 +171,7 @@ def read_controls(path: Path) -> dict:
         sys.exit(f"{path.name} is damaged – delete it to start again without assignments.")
     controls: dict = {}
     for name, number in stored.items() if isinstance(stored, dict) else ():
-        if (name in zs.SYNTH_CONTROLS and isinstance(number, int) and not isinstance(number, bool)
+        if (name in zs.ALL_CONTROLS and isinstance(number, int) and not isinstance(number, bool)
                 and 0 <= number <= 127 and number not in RESERVED_CONTROLS
                 and number not in controls.values()):
             controls[name] = number
@@ -166,8 +179,9 @@ def read_controls(path: Path) -> dict:
 
 
 class Keys:
-    """Which note a monophonic synth should sound: the last one pressed wins, and when it is
-    released the one pressed before it comes back if it is still down."""
+    """Which notes the synth should sound: the last one pressed wins, and when it is released the
+    one pressed before it comes back if it is still down. With several voices the same holds for
+    the last few notes."""
 
     def __init__(self, sustain_enabled: bool = True):
         self.sustain_enabled = sustain_enabled
@@ -198,9 +212,27 @@ class Keys:
 
     @property
     def note(self) -> Optional[int]:
-        """The MIDI note that should sound, None for silence."""
-        notes = self.held or self.sustained
-        return notes[-1] if notes else None
+        """The MIDI note that should sound on a single voice, None for silence."""
+        notes = self.notes(1)
+        return notes[0] if notes else None
+
+    def notes(self, voices: int) -> list:
+        """The MIDI notes that should sound on so many voices, the most important first: keys that
+        are down before notes the sustain pedal holds, the latest first in both."""
+        return (self.held[::-1] + self.sustained[::-1])[:voices]
+
+
+class Voice:
+    """One Key knob of the synth effect: the note given to it and what the pedal holds."""
+
+    def __init__(self, index: int):
+        self.index = index                       # 0 = KeySynth's Key or KeyPoly's Key1, up to Key4
+        self.note: Optional[int] = None          # the MIDI note it plays, None = gate closed
+        self.note_sent: Optional[int] = None     # the note the last Key value was for
+        self.key_sent: Optional[int] = None      # the Key value the pedal holds, as far as we know; None = unknown
+        self.awaiting: deque = deque()           # KeySent, ack outstanding
+        self.last_note: Optional[int] = None     # the note it played last, sounding or fading out
+        self.freed = float("-inf")               # when its last note was taken from it
 
 
 @dataclass(frozen=True)
@@ -261,7 +293,7 @@ class Target:
         self.misses_in_row = 0
         self.confirmed = False                              # the pedal has acknowledged or reported it
         self.stopped = False                                # not learned and never confirmed: nothing more is sent
-        self.blocked = False                                # a KeySynth knob the expression pedal must not write
+        self.blocked = False                                # a synth effect's knob the expression pedal must not write
         self.expression = True                              # False: only a keyboard controller sets it
 
 
@@ -271,6 +303,7 @@ class Session:
     def __init__(self, bridge: "Bridge"):
         cfg = bridge.cfg
         self.synth = bridge.synth                           # None: no keyboard synth set up
+        self.effects = synth_effects(self.synth)            # effect id → zs.SynthEffect the keyboard plays
         inputs, outputs = mido.get_input_names(), mido.get_output_names()
         self.zoom_in_name = zs.find_port(inputs, cfg["ports"]["zoom"])
         self.zoom_out_name = zs.find_port(outputs, cfg["ports"]["zoom"])
@@ -313,16 +346,16 @@ class Session:
         self.next_report = self.next_port_check = 0.0
         self.query_at: Optional[float] = None               # when a patch query is due
 
-        # KeySynth: the keyboard writes the effect's Key knob
+        # KeySynth or KeyPoly: the keyboard writes the effect's Key knobs
         self.keys = Keys(self.synth["sustain"] if self.synth else True)
         self.bend = 0.0                                     # semitones, from the pitch wheel
-        self.note_sent: Optional[int] = None                # the note the last Key value was for
-        self.controls: dict = {}                            # CC number → (Target, name in zs.SYNTH_CONTROLS)
+        self.controls: dict = {}                            # CC number → (Target, name in the effect's controls)
         self.told: set = set()                              # remarks made about the assignments of this preset
         self.synth_slot: Optional[int] = None               # where the effect sits in the current preset
+        self.synth_effect: Optional[zs.SynthEffect] = None  # which of the two it is
         self.synth_known = False                            # a patch dump has told us whether it is there
-        self.key_sent: Optional[int] = None                 # the Key value the pedal holds, as far as we know
-        self.key_awaiting: deque = deque()                  # KeySent, ack outstanding
+        self.voices: list = []                              # one Voice per Key knob of the effect
+        self.bend_turn = -1                                 # the voice that followed the pitch wheel last
         self.key_misses = 0
         self.key_totals = {"sent": 0, "acked": 0, "missed": 0, "overtaken": 0}
         self.key_latencies: deque = deque(maxlen=50)
@@ -361,7 +394,7 @@ class Session:
             say("Current preset unknown – expression is ignored until the pedal reports a preset.")
         if self.synth is not None:
             if not self.can_query_patch:
-                say("KeySynth: the patch query is not approved (`python probe.py approve query_patch`) "
+                say("Keyboard synth: the patch query is not approved (`python probe.py approve query_patch`) "
                     "– the keyboard is ignored")
             else:
                 self.patch_query_at = None
@@ -374,10 +407,10 @@ class Session:
     def close(self) -> None:
         try:
             if self.edit_enabled:
-                if self.synth_slot is not None and self.key_sent:   # never leave a note hanging
+                if any(voice.key_sent for voice in self.voices):    # never leave a note hanging
                     self.keys.clear()
-                    self._send_key(0, time.monotonic())
-                    self._wait(lambda raw: not self.key_awaiting, 0.3)
+                    self._play(time.monotonic())
+                    self._wait(lambda raw: not any(voice.awaiting for voice in self.voices), 0.3)
                 self.sender.send(zs.build_edit_disable(self.device_id))
                 self._wait(lambda raw: zs.is_ack(zs.zoom_body(raw, self.device_id)), 0.5)
         except OSError:
@@ -489,7 +522,7 @@ class Session:
                 self.refresh()
                 self.query_at = now + QUERY_DELAY
 
-    # --- Keyboard → the KeySynth's knobs ---
+    # --- Keyboard → the synth effect's knobs ---
 
     def _on_keyboard(self, message, now: float) -> None:
         synth = self.synth
@@ -527,58 +560,84 @@ class Session:
             return
         target, name = self.controls.get(number, (None, None))
         if target is not None and not (target.stopped or target.blocked):
-            target.pending = (zs.control_value(name, value), now)   # an older value is dropped
+            target.pending = (zs.control_value(name, value, self.synth_effect), now)   # an older value is dropped
 
-    def _wanted_key(self) -> int:
-        """The Key value for the keys that are down and the pitch wheel; 0 = gate off."""
-        note = self.keys.note
-        return 0 if note is None else zs.key_for(note, self.bend)
+    def _wanted_key(self, voice: Voice) -> int:
+        """The Key value for the voice's note and the pitch wheel; 0 = gate off."""
+        return 0 if voice.note is None else zs.key_for(voice.note, self.bend)
+
+    def _assign(self, now: float) -> None:
+        """Gives every note that should sound a voice. A note that sounds keeps its voice, so a
+        key released or added leaves the others alone. A new note takes the free voice that last
+        played it, otherwise the one that has been free longest (its release has faded most).
+        With more notes than voices the oldest gives its voice up and gets it back when a newer
+        one is released, as a single voice does."""
+        wanted = self.keys.notes(len(self.voices))
+        for voice in self.voices:
+            if voice.note is not None and voice.note not in wanted:
+                voice.note, voice.freed = None, now
+        sounding = {voice.note for voice in self.voices}
+        for note in wanted:
+            if note not in sounding:
+                voice = min((voice for voice in self.voices if voice.note is None),
+                            key=lambda voice: (voice.last_note != note, voice.freed))
+                voice.note = voice.last_note = note
 
     def _play(self, now: float) -> None:
-        """Brings the pedal's Key knob in line with the keys that are down. A note goes out at
+        """Brings the pedal's Key knobs in line with the keys that are down. A note goes out at
         once: it is not spaced, delayed or merged, only an unchanged value is skipped."""
-        key, note = self._wanted_key(), self.keys.note
         if self.synth_slot is None:
-            if key:                                 # the effect may have been added just now
+            if self.keys.note is not None:          # the effect may have been added just now
                 self._look_for_synth(now)
             return
-        if note is not None and note == self.note_sent and self.key_sent:
-            return                                  # the same note still sounds: _bend_step follows the wheel
-        if key != self.key_sent:
-            self._send_key(key, now)
-        self.note_sent = note
+        self._assign(now)
+        for voice in self.voices:
+            if voice.note is not None and voice.note == voice.note_sent and voice.key_sent:
+                continue                            # the same note still sounds: _bend_step follows the wheel
+            if voice.note is None and voice.key_sent is None:
+                continue                            # never played and not known: left as it is until it is needed
+            key = self._wanted_key(voice)
+            if key != voice.key_sent:
+                self._send_key(voice, key, now)
+            voice.note_sent = voice.note
 
     def _bend_step(self, now: float) -> bool:
-        """While a note sounds, moves the Key knob towards where the pitch wheel wants it, at most
-        KEY_BEND_STEP clicks per message. The effect takes a larger move for a new note and, with
-        Glide on, would slide to it instead of following the wheel."""
-        if self.synth_slot is None or not self.key_sent or self.keys.note != self.note_sent:
-            return False
-        wanted = self._wanted_key()
-        if not wanted or wanted == self.key_sent:
-            return False
-        step = max(-zs.KEY_BEND_STEP, min(zs.KEY_BEND_STEP, wanted - self.key_sent))
-        self._send_key(self.key_sent + step, now, bend=True)
-        return True
+        """While notes sound, moves one Key knob towards where the pitch wheel wants it, at most
+        KEY_BEND_STEP clicks per message; the voices take turns. The effect takes a larger move
+        for a new note and, with KeySynth's Glide on, would slide to it instead of following the
+        wheel."""
+        count = len(self.voices)
+        for offset in range(1, count + 1):
+            voice = self.voices[(self.bend_turn + offset) % count]
+            if voice.note is None or voice.note != voice.note_sent or not voice.key_sent:
+                continue
+            wanted = self._wanted_key(voice)
+            if wanted == voice.key_sent:
+                continue
+            step = max(-zs.KEY_BEND_STEP, min(zs.KEY_BEND_STEP, wanted - voice.key_sent))
+            self._send_key(voice, voice.key_sent + step, now, bend=True)
+            self.bend_turn = voice.index
+            return True
+        return False
 
-    def _send_key(self, key: int, now: float, played: Optional[float] = None, attempt: int = 0,
-                  bend: bool = False) -> None:
-        self.sender.send(zs.build_set_key(self.device_id, self.synth_slot, key))
-        self.key_sent = key
+    def _send_key(self, voice: Voice, key: int, now: float, played: Optional[float] = None,
+                  attempt: int = 0, bend: bool = False) -> None:
+        self.sender.send(zs.build_set_key(self.device_id, self.synth_slot, key, voice.index))
+        voice.key_sent = key
         self.last_send = time.monotonic()           # every other value keeps its distance from a note
-        self.key_awaiting.append(KeySent(key, now if played is None else played, now, attempt, bend))
+        voice.awaiting.append(KeySent(key, now if played is None else played, now, attempt, bend))
         self.key_totals["sent"] += 1
 
-    def _on_key_ack(self, value: int, now: float) -> None:
-        if all(sent.value != value for sent in self.key_awaiting):
+    def _on_key_ack(self, voice: Voice, value: int, now: float) -> None:
+        if all(sent.value != value for sent in voice.awaiting):
             return
         while True:                                 # acks arrive in send order
-            sent = self.key_awaiting.popleft()
+            sent = voice.awaiting.popleft()
             if sent.value == value:
                 break
             # Seen on the real pedal: of two messages 1 ms apart (two keys almost together) only
             # the second is confirmed. The first was replaced before it could matter.
-            zs.log.info("--  Key %d was overtaken by the next message", sent.value)
+            zs.log.info("--  %s %d was overtaken by the next message", self._key_name(voice), sent.value)
             self.key_totals["overtaken"] += 1
         self.key_misses = 0
         self.key_totals["acked"] += 1
@@ -590,18 +649,22 @@ class Session:
             what = f"{note_name(note):>4} ({note:3d})" + (f" {cents:+d} c" if cents else "")
         else:
             what = "       off"
-        print(f"{time.strftime('%H:%M:%S')}  {what} → Key {value:4d}   ack {1000 * (now - sent.time):5.1f} ms",
-              flush=True)
+        print(f"{time.strftime('%H:%M:%S')}  {what} → {self._key_name(voice)} {value:4d}   "
+              f"ack {1000 * (now - sent.time):5.1f} ms", flush=True)
 
-    def _key_miss(self, sent: KeySent, now: float) -> None:
+    def _key_name(self, voice: Voice) -> str:
+        """"Key" on KeySynth, "Key1" to "Key4" on KeyPoly."""
+        return self.synth_effect.knobs[voice.index][0] if self.synth_effect else "Key"
+
+    def _key_miss(self, voice: Voice, sent: KeySent, now: float) -> None:
         """No ack for a note in time. Seen on the real pedal: while the player is in its effect
         menu a message can get lost."""
-        zs.log.info("--  no ack for Key %d", sent.value)
-        if (not self.key_awaiting and sent.value == self.key_sent == self._wanted_key()
+        zs.log.info("--  no ack for %s %d", self._key_name(voice), sent.value)
+        if (not voice.awaiting and sent.value == voice.key_sent == self._wanted_key(voice)
                 and sent.attempt < KEY_RETRIES):
             # The last note, the end of a bend or the gate-off must not get lost. Repeating is
             # harmless: the pedal ignores a value it already holds.
-            self._send_key(sent.value, now, played=sent.time, attempt=sent.attempt + 1, bend=sent.bend)
+            self._send_key(voice, sent.value, now, played=sent.time, attempt=sent.attempt + 1, bend=sent.bend)
         if sent.attempt:
             return          # counted once, with the first try
         self.key_totals["missed"] += 1
@@ -615,7 +678,7 @@ class Session:
             if now - self.last_key_trouble >= KEY_TROUBLE_SECONDS:
                 self.last_key_trouble = now
                 say("WARNING: the pedal does not confirm notes – switching edit mode on again and "
-                    "looking for the KeySynth effect")
+                    "looking for the synth effect")
                 self._look_for_synth(now)
 
     def _reenable_edit(self, now: float) -> None:
@@ -641,23 +704,28 @@ class Session:
         self.sender.send(zs.build_query_patch(self.device_id))
 
     def _on_patch(self, dump: zs.PatchDump, now: float) -> None:
-        slot = next((index for index, effect in enumerate(dump.effects)
-                     if effect.id == self.synth["effect_id"]), None)
-        changed = slot != self.synth_slot or not self.synth_known
-        if slot != self.synth_slot:                 # what stood in the old place says nothing about the new one
+        # The first synth effect in the chain is played; a second one is left alone.
+        slot, effect = next(((index, self.effects[found.id]) for index, found in enumerate(dump.effects)
+                             if found.id in self.effects), (None, None))
+        moved = (slot, effect) != (self.synth_slot, self.synth_effect)
+        changed = moved or not self.synth_known
+        if moved:                                   # what stood in the old place says nothing about the new one
             self.targets, self.told = [], set()
-        self.synth_slot, self.synth_known = slot, True
+            self.voices = [Voice(index) for index in range(effect.voices)] if effect else []
+        self.synth_slot, self.synth_effect, self.synth_known = slot, effect, True
         if slot is None:
-            self.key_sent = self.note_sent = None
-            self.key_awaiting.clear()
             if changed:
-                say("No KeySynth effect in this preset – the keyboard is ignored")
+                names = " or ".join(known.name for known in self.effects.values())
+                say(f"No {names} effect in this preset – the keyboard is ignored")
         else:
-            if not self.key_awaiting and dump.effects[slot].first_param != self.key_sent:
-                self.key_sent = dump.effects[slot].first_param   # what the pedal's Key knob holds now
-                self.note_sent = None
+            # The dump shows the effect's first knob only: what Key or Key1 holds now. Key2–Key4
+            # stay unknown until the bridge writes them.
+            first = self.voices[0]
+            if not first.awaiting and dump.effects[slot].first_param != first.key_sent:
+                first.key_sent, first.note_sent = dump.effects[slot].first_param, None
             if changed:
-                say(f"KeySynth is effect {slot + 1} – the keyboard plays it")
+                voices = f" with {effect.voices} voices" if effect.voices > 1 else ""
+                say(f"{effect.name} is effect {slot + 1} – the keyboard plays it{voices}")
         if changed:
             self.refresh()
         if self.keys.note is not None:
@@ -729,8 +797,9 @@ class Session:
         for target in self.targets:
             while target.awaiting and now - target.awaiting[0].send_time > ACK_TIMEOUT:
                 self._miss(target, target.awaiting.popleft(), now)
-        while self.key_awaiting and now - self.key_awaiting[0].send_time > KEY_ACK_TIMEOUT:
-            self._key_miss(self.key_awaiting.popleft(), now)
+        for voice in self.voices:
+            while voice.awaiting and now - voice.awaiting[0].send_time > KEY_ACK_TIMEOUT:
+                self._key_miss(voice, voice.awaiting.popleft(), now)
 
     def _miss(self, target: Target, sent: Sent, now: float) -> None:
         """No ack. The pedal only confirms changes, so a single miss is normal."""
@@ -791,12 +860,12 @@ class Session:
                 self._set_patch(*program_info)
             elif dump:
                 self._on_patch(dump, now)
-            elif change and self.synth_slot is not None and (change.slot, change.param) == (
-                    self.synth_slot, zs.KEY_PARAM):
+            elif change and change.slot == self.synth_slot and 0 <= change.param - zs.KEY_PARAM < len(self.voices):
+                voice = self.voices[change.param - zs.KEY_PARAM]
                 if change.ack:
-                    self._on_key_ack(change.value, now)
+                    self._on_key_ack(voice, change.value, now)
                 else:
-                    self.key_sent, self.note_sent = change.value, None   # the Key knob was turned on the pedal
+                    voice.key_sent, voice.note_sent = change.value, None   # a Key knob was turned on the pedal
             elif change:
                 target = next((t for t in self.targets if (t.mapping.slot, t.mapping.param) == (
                     change.slot, change.param)), None)
@@ -822,8 +891,7 @@ class Session:
             self.learning = None
             say("Learning cancelled: preset changed")
         if self.synth is not None:   # the effect may sit elsewhere now, or not be there at all
-            self.synth_slot, self.synth_known, self.key_sent, self.note_sent = None, False, None, None
-            self.key_awaiting.clear()
+            self.synth_slot, self.synth_effect, self.synth_known, self.voices = None, None, False, []
             self.patch_query_at = time.monotonic() + QUERY_DELAY
         self.targets, self.told = [], set()   # another preset: nothing is carried over, remarks are made afresh
         self.refresh()
@@ -852,9 +920,10 @@ class Session:
                 say(text)
 
         self.targets, self.controls, allowed, knobs = [], {}, [], {}
+        effect = self.synth_effect
         if self.synth_slot is not None:
-            allowed += zs.synth_targets(self.synth_slot)
-            knobs = {zs.MIN_PARAM + index: knob for index, knob in enumerate(zs.SYNTH_KNOBS)}
+            allowed += zs.synth_targets(self.synth_slot, effect)
+            knobs = {zs.MIN_PARAM + index: knob for index, knob in enumerate(effect.knobs)}
         for mapping in (self.bridge.mappings.get(self.patch, ()) if self.patch else ()):
             learned = self.bridge.measurements.get(self.patch, mapping.slot, mapping.param) is not None
             target = carry(Target(mapping, learned))
@@ -862,16 +931,18 @@ class Session:
             knob = knobs.get(mapping.param) if mapping.slot == self.synth_slot else None
             if knob is None:
                 allowed.append(zs.ParamTarget(mapping.slot, mapping.param, mapping.min, mapping.max))
-            elif mapping.param == zs.KEY_PARAM:
-                target.blocked = True   # the keyboard owns the Key knob; expression must not write notes
-                remark(f"Expression is not sent to {mapping.describe()}: that is the KeySynth's Key knob")
+            elif mapping.param < zs.KEY_PARAM + effect.voices:
+                target.blocked = True   # the keyboard owns the Key knobs; expression must not write notes
+                remark(f"Expression is not sent to {mapping.describe()}: that is the {effect.name}'s {knob[0]} knob")
             elif mapping.max > knob[1]:
-                target.blocked = True   # a range learned from another effect or an older KeySynth
-                remark(f"Expression is not sent to {mapping.describe()}: the KeySynth's {knob[0]} knob "
+                target.blocked = True   # a range learned from another effect or an older version
+                remark(f"Expression is not sent to {mapping.describe()}: the {effect.name}'s {knob[0]} knob "
                        f"only goes up to {knob[1]} – learn it again")
         if self.synth_slot is not None:   # the keyboard's controllers, one Target per knob
             for name, number in self.bridge.controls.items():
-                param, top = zs.synth_knob(zs.SYNTH_CONTROLS[name][0])
+                if name not in effect.controls:
+                    continue            # a knob only the other synth effect has
+                param, top = zs.synth_knob(effect.controls[name][0], effect)
                 target = next((t for t in self.targets if (t.mapping.slot, t.mapping.param) == (
                     self.synth_slot, param)), None)
                 if target is None:
@@ -1039,6 +1110,7 @@ class Bridge:
         session = self.session
         patch = session.patch if session else None
         latencies = [1000 * seconds for seconds in session.recent_latencies] if session else []
+        effect = session.synth_effect if session else None
         learning = None
         if session and session.learning is not None:
             learning = [{"slot": slot, "param": param, "min": min(values), "max": max(values),
@@ -1054,11 +1126,16 @@ class Bridge:
             "synth": None if self.synth is None else {
                 "keyboard": bool(session and session.keyboard is not None),
                 "expression": bool(session and session.chocolate is not None),
+                "effects": [known.name for known in synth_effects(self.synth).values()],
                 "slot": session.synth_slot if session else None,
-                "key": session.key_sent if session else None,
+                "effect": effect.name if effect else None,
+                "key": session.voices[0].key_sent if session and session.voices else None,
+                "voices": [None if voice.note is None else note_name(voice.note) for voice in session.voices]
+                if session else [],
                 "bend_range": self.synth["bend_range"],
+                # the knobs of the effect in the preset; while there is none, every knob of both
                 "knobs": [{"name": name, "knob": knob, "rest": rest, "full": full, "cc": self.controls.get(name)}
-                          for name, (knob, rest, full) in zs.SYNTH_CONTROLS.items()],
+                          for name, (knob, rest, full) in (effect.controls if effect else zs.ALL_CONTROLS).items()],
                 "learning": self.control_learning,
                 "totals": dict(session.key_totals) if session else None,
                 "latency_ms": round(statistics.median(1000 * seconds for seconds in session.key_latencies), 1)
@@ -1125,7 +1202,7 @@ class Bridge:
                 "added": added, "known": known}
 
     def synth_control(self, action: str, knob: Optional[str] = None) -> None:
-        """learn: the next controller moved on the keyboard will set this KeySynth knob.
+        """learn: the next controller moved on the keyboard will set this knob of the synth effect.
         cancel: stop waiting for one. clear: no controller sets the knob any more."""
         self._changeable()
         if self.synth is None:
@@ -1133,7 +1210,7 @@ class Bridge:
         if action == "cancel":
             self.control_learning = None
             return
-        if not isinstance(knob, str) or knob not in zs.SYNTH_CONTROLS:   # anything can arrive over HTTP
+        if not isinstance(knob, str) or knob not in zs.ALL_CONTROLS:   # anything can arrive over HTTP
             raise UserError("Unknown knob.")
         if action == "clear":
             self.control_learning = None
@@ -1156,7 +1233,9 @@ class Bridge:
             del self.controls[other]              # one controller sets one thing
         self.controls[knob] = number
         self._store_controls()
-        say(f"KeySynth: controller {number} now sets {knob}")
+        effect = self.session.synth_effect if self.session else None
+        owner = effect.name if effect and knob in effect.controls else "Keyboard synth"
+        say(f"{owner}: controller {number} now sets {knob}")
 
     def _changeable(self) -> None:
         if self.fixed:

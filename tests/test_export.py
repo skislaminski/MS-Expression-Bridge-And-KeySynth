@@ -165,6 +165,10 @@ class Rules(ExportCase):
             "not approved: query_patch": drop("approvals", "messages", "query_patch"),
             "the backup of the patches has not been confirmed": put(None, "approvals", "backup_confirmed"),
             "“Key” is nothing a controller can set": put(20, "controls", "Key"),
+            "“Key2” is nothing a controller can set": put(20, "controls", "Key2"),
+            "effect_id and poly_effect_id must be two different effects": put(0x07000F61, "synth", "poly_effect_id"),
+            "poly_effect_id must be the id of the KeyPoly effect": put(-1, "synth", "poly_effect_id"),
+            "effect_id must be the id of the KeySynth effect (or poly_effect_id": put(None, "synth", "effect_id"),
             "Rate needs a controller number from 0 to 127 that is not reserved": put(64, "controls", "Rate"),
             "one controller is assigned twice": put(1, "controls", "Rate"),
             "looks like raw bytes": put("F0 52 00 6E 50 F7", "mappings", PRESET, 0, "name"),
@@ -178,6 +182,9 @@ class Rules(ExportCase):
                 self.assertTrue(any(expected in problem for problem in problems), problems)
 
     def test_what_is_allowed(self):
+        def put(value, *path):
+            return lambda data: data[path[0]].update({path[1]: value})
+
         fine = {
             "keyboard only, no expression controller": lambda data: (
                 data["ports"].update(chocolate=""), data["expression"].update(cc=None, channel=None),
@@ -187,6 +194,9 @@ class Rules(ExportCase):
                 {"slot": 5, "param": 13, "min": 0, "max": 16383}),
             "no interface section": lambda data: data.pop("ui"),
             "a name with numbers in it": lambda data: data["mappings"][PRESET][0].update(name="Mix 50 to 70, take 2"),
+            "KeyPoly besides KeySynth": put(0x07000F62, "synth", "poly_effect_id"),
+            "KeyPoly only": lambda data: data["synth"].update(effect_id=None, poly_effect_id=0x07000F62),
+            "a controller on a knob only KeyPoly has": lambda data: data["controls"].update(Cutoff=20, Reso=21),
         }
         for what, change in fine.items():
             with self.subTest(what):

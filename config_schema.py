@@ -7,7 +7,7 @@ carries everything the bridge needs:
     exported_at      when export.py wrote it
     learned          learned ranges per preset: {"9/4": [{slot, param, min, max}, …]}
     approvals        {"backup_confirmed": timestamp, "messages": {message kind: timestamp}}
-    controls         which controller of the keyboard sets what on the KeySynth: {name: CC number}
+    controls         which controller of the keyboard sets what on the synth effect: {name: CC number}
 
 It holds values only: never code, and never raw SysEx bytes. Messages are still built in
 zoom_sysex.py alone. export.py (on the computer where everything was set up) and bridge.py
@@ -28,7 +28,7 @@ FILE_NAME = "expression-bridge.yaml"
 PREVIOUS_NAME = "expression-bridge.prev.yaml"
 
 REQUIRED_KINDS = ("identity_request", "edit_enable", "edit_disable", "set_param", "query_program")
-SYNTH_KINDS = ("query_patch",)                 # needed in addition when a keyboard plays the KeySynth
+SYNTH_KINDS = ("query_patch",)                 # needed in addition when a keyboard plays a synth effect
 CURVES = ("linear", "log", "exp")
 MAX_TARGETS = 4                                # parameters the expression pedal controls per preset
 MAX_EFFECTS = 6                                # without a learned range: effect 1–6 …
@@ -43,7 +43,8 @@ SECTIONS = {
     "expression": {"cc", "channel", "min", "max", "invert"},
     "bridge": {"min_interval_ms", "deadband", "passthrough"},
     "ui": {"port"},
-    "synth": {"keyboard", "channel", "effect_id", "low_note", "high_note", "sustain", "bend_range"},
+    "synth": {"keyboard", "channel", "effect_id", "poly_effect_id", "low_note", "high_note", "sustain",
+              "bend_range"},
 }
 EXTRA = {"schema_version", "exported_at", "learned", "approvals", "controls", "mappings"}
 # A message, not a name or a value: four or more two-digit hex numbers in a row ("F0 52 00 6E"),
@@ -148,8 +149,14 @@ def validate(data) -> list:
             add("synth: keyboard must be a text.")
         if not _is_int(synth.get("channel", 0), 0, 16):
             add("synth: channel must be a number from 0 to 16 (0 = any).")
-        if not _is_int(synth.get("effect_id"), 1, 0xFFFFFFFF):
-            add("synth: effect_id must be the id of the KeySynth effect.")
+        ids = {name: synth.get(name) for name in ("effect_id", "poly_effect_id") if synth.get(name) is not None}
+        if not ids:
+            add("synth: effect_id must be the id of the KeySynth effect (or poly_effect_id that of KeyPoly).")
+        for name, number in ids.items():
+            if not _is_int(number, 1, 0xFFFFFFFF):
+                add(f"synth: {name} must be the id of the {'KeyPoly' if name.startswith('poly') else 'KeySynth'} effect.")
+        if len(ids) == 2 and ids["effect_id"] == ids["poly_effect_id"]:
+            add("synth: effect_id and poly_effect_id must be two different effects.")
         note_low, note_high = synth.get("low_note", 0), synth.get("high_note", 127)
         if not (_is_int(note_low, 0, 127) and _is_int(note_high, 0, 127) and note_low <= note_high):
             add("synth: low_note and high_note must be notes from 0 to 127, with low_note ≤ high_note.")
@@ -235,8 +242,8 @@ def validate(data) -> list:
         add("controls must list a controller number per name.")
     else:
         for name, number in controls.items():
-            if name not in zs.SYNTH_CONTROLS:
-                add(f"controls: “{name}” is nothing a controller can set on the KeySynth.")
+            if name not in zs.ALL_CONTROLS:
+                add(f"controls: “{name}” is nothing a controller can set on KeySynth or KeyPoly.")
             elif not _is_int(number, 0, 127) or number in RESERVED_CONTROLS:
                 add(f"controls: {name} needs a controller number from 0 to 127 that is not reserved.")
         numbers = [number for number in controls.values() if isinstance(number, int)]

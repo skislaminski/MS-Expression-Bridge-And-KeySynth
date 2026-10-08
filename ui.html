@@ -100,7 +100,7 @@
                   background: linear-gradient(#fff, #fff) no-repeat center top / 2px 8px,
                               radial-gradient(circle, #dcdcdc 0 30%, #7d7d7d 31% 37%, #0b0b0b 38%);
                   box-shadow: 0 2px 3px rgba(0, 0, 0, .8), inset 0 0 0 1px #3a3a3a; }
-  .knob b { min-width: 48px; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
+  .knob b { min-width: 60px; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
   .knob span { flex: 1; color: var(--muted); font-size: 13px; white-space: nowrap; }
   .knob.waiting { border-color: var(--blue); }
   .knob.waiting span { color: var(--blue); }
@@ -134,7 +134,7 @@
     <div class="section-head"><h2>Keyboard synth</h2></div>
     <p class="readout" id="synthStatus"></p>
     <div class="knobs" id="knobs"></div>
-    <p class="hint">To set a KeySynth knob from your keyboard, click “Learn” next to it and move the knob, slider or wheel you want to use. Any control that sends values 0–127 works; one control sets one knob. “Vib” and “Trm” are the two halves of the LFO knob: with the control at rest the LFO is off, at full travel the vibrato or tremolo is deepest – the way a mod wheel works on a hardware synth. Notes and the pitch wheel always play the Key knob (the wheel bends ±<span id="bendRange"></span> semitones, see <code>bend_range</code> in config.yaml).</p>
+    <p class="hint">To set a knob of the synth effect from your keyboard, click “Learn” next to it and move the knob, slider or wheel you want to use. Any control that sends values 0–127 works; one control sets one knob. The list shows the knobs of the effect in the current preset (KeySynth or KeyPoly); a knob both have, such as Level, is set on whichever of them is there. “Vib” and “Trm” are the two halves of the LFO knob: with the control at rest the LFO is off, at full travel the vibrato or tremolo is deepest – the way a mod wheel works on a hardware synth. Notes and the pitch wheel always play the Key knob – on KeyPoly the four Key knobs, one note each (the wheel bends ±<span id="bendRange"></span> semitones, see <code>bend_range</code> in config.yaml).</p>
   </section>
 
   <section class="now">
@@ -350,7 +350,9 @@ function renderSynth() {
   $("synth").hidden = !synth;
   if (!synth) return;
   $("synthStatus").textContent = (synth.keyboard ? "Keyboard connected" : "Keyboard not connected")
-    + "  ·  " + (synth.slot == null ? "no KeySynth effect in this preset" : `KeySynth is effect ${synth.slot + 1}`)
+    + "  ·  " + (synth.slot == null ? `no ${synth.effects.join(" or ")} effect in this preset`
+      : `${synth.effect} is effect ${synth.slot + 1}`)
+    + (synth.voices.length > 1 ? "  ·  voices " + synth.voices.map((note) => note || "–").join(" ") : "")
     + (synth.latency_ms == null ? "" : `  ·  note → confirmed ${synth.latency_ms} ms`);
   $("bendRange").textContent = synth.bend_range;
 

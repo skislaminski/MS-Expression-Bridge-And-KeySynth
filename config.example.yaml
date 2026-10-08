@@ -24,11 +24,12 @@ bridge:
 ui:
   port: 8765                      # interface: http://127.0.0.1:8765
 
-synth:                            # optional: a MIDI keyboard plays the KeySynth effect (README, "Keyboard synth")
+synth:                            # optional: a MIDI keyboard plays KeySynth or KeyPoly (README, "Keyboard synth")
   keyboard: ""                    # substring of the keyboard's port name; empty = switched off
   channel: 0                      # 1–16, or 0 for any channel
-  effect_id: 0x07000F61           # id of the KeySynth effect on the pedal
-  low_note: 0                     # notes outside low_note–high_note are ignored (the effect plays 12–111)
+  effect_id: 0x07000F61           # id of the KeySynth effect on the pedal (one voice)
+  poly_effect_id: null            # id of the KeyPoly effect (four voices), from its manifest.json; null = not used
+  low_note: 0                     # notes outside low_note–high_note are ignored (the effects play 12–111)
   high_note: 127
   sustain: true                   # the sustain pedal (CC 64) holds notes
   bend_range: 2                   # semitones the pitch wheel bends each way, 0–12; 0 = wheel ignored

@@ -4,7 +4,8 @@ Control a **Zoom MS-60B+** from MIDI controllers, in real time:
 
 - an **expression pedal** moves effect parameters, and
 - a **MIDI keyboard** plays [KeySynth](keysynth/README.md), a synth voice that runs on the pedal
-  as a custom effect (optional, the effect is included).
+  as a custom effect (optional, the effect is included), or **KeyPoly**, its four-voice sibling
+  (see [Four voices: KeyPoly](#four-voices-keypoly); the effect is not part of this repository yet).
 
 The MS-60B+ officially accepts only patch changes over USB MIDI. Parameter changes need
 unofficial SysEx messages, which a plain MIDI controller cannot send. This program sits in
@@ -41,9 +42,9 @@ See [Installation](#installation) for all three systems.
   range ("Learn parameter")
 - Follows preset changes on the pedal; presets without an assignment are left alone
 - Waits for missing devices and reconnects after replugging (tested with the controller)
-- Optional: a MIDI keyboard plays the custom effect KeySynth on the pedal, with pitch wheel,
-  and with any wheel, knob or slider of the keyboard assigned to the synth's knobs by
-  "Learn", see [Keyboard synth](#keyboard-synth)
+- Optional: a MIDI keyboard plays the custom effect KeySynth (one voice) or KeyPoly (four voices)
+  on the pedal, with pitch wheel, and with any wheel, knob or slider of the keyboard assigned to
+  the synth's knobs by "Learn", see [Keyboard synth](#keyboard-synth)
 - Sends only message kinds you have approved, and logs every SysEx message sent and received
 
 ## Before you start
@@ -213,17 +214,18 @@ below it everything about the expression pedal:
 
 ## Keyboard synth
 
-Optional, and only useful with the custom effect **KeySynth** (version 0.21 or later) installed
-on the pedal: a two-oscillator synth voice whose first knob, "Key", is gate and pitch in one
-number (0 = off, n = 10-cent steps above C0). The effect, its source and how to install it are
-in [`keysynth/`](keysynth/README.md); **read the warnings there first**, a custom effect can
+Optional, and only useful with the custom effect **KeySynth** (version 0.21 or later) or its
+four-voice sibling **KeyPoly** ([below](#four-voices-keypoly)) installed on the pedal. KeySynth is
+a two-oscillator synth voice whose first knob, "Key", is gate and pitch in one number (0 = off,
+n = 10-cent steps above C0). The effect, its source and how to install it are in
+[`keysynth/`](keysynth/README.md); **read the warnings there first**, a custom effect can
 make a pedal unusable. (There is also a build of the effect for the MS-50G+ and MS-70CDR+ in
 there. It is untested, and so is the bridge with those pedals.) With the `synth:` section filled
 in in `config.yaml`, a MIDI keyboard plays that effect:
 
-- Monophonic, last note wins; releasing it returns to a note that is still held. Note on with
-  velocity 0 counts as note off, the sustain pedal (CC 64) holds notes, "all notes off" and
-  stopping the bridge close the gate. The effect plays MIDI notes 12–111 (C0 to D#8).
+- KeySynth is monophonic, last note wins; releasing it returns to a note that is still held.
+  Note on with velocity 0 counts as note off, the sustain pedal (CC 64) holds notes, "all notes
+  off" and stopping the bridge close the gate. The effect plays MIDI notes 12–111 (C0 to D#8).
 - **Pitch wheel:** bends the sounding note, ±2 semitones unless `bend_range` says otherwise.
   Note and bend travel as one value, so a note always arrives with its pitch. While a note
   sounds the wheel is followed in steps of at most 90 cents per message; the effect smooths
@@ -250,6 +252,35 @@ in in `config.yaml`, a MIDI keyboard plays that effect:
 
 Each confirmed note is printed with the time from key press to the pedal's acknowledgement
 (bend steps are not, they would flood the terminal).
+
+### Four voices: KeyPoly
+
+KeyPoly is a four-voice synth effect for the pedal, built separately (it is not in this
+repository yet, and **neither it nor this part of the bridge has run on a pedal**). It has four
+Key knobs, Key1–Key4, each in KeySynth's format, and eight knobs the voices share: Level, Wave,
+Cutoff, Reso, Atk, Rel, LFO, Rate. Without the bridge it can only be played by turning the four
+Key knobs by hand; the bridge gives every note one of them:
+
+- Enter KeyPoly's effect id (from its `manifest.json`) as `poly_effect_id` under `synth:` in
+  `config.yaml`. `effect_id` (KeySynth) may stay; the bridge plays whichever of the two is in the
+  preset, the first in the chain if both are.
+- **A note keeps its voice.** Releasing a key closes its voice only; the others are not written
+  at all. A chord goes out at once, one message per note.
+- **A new note** takes the free voice that last played the same note (so one note never sounds
+  on two voices), otherwise the voice that has been free longest, whose release has faded most.
+- **A fifth note** takes the voice of the oldest note. Keys that are down beat notes the sustain
+  pedal holds. If a newer key is released while the older one is still down, the older one gets a
+  voice back, as with KeySynth.
+- **Pitch wheel:** every sounding voice follows, in the same small steps as on KeySynth; the
+  voices take turns, so a full bend of a four-note chord takes about four times as long.
+- Key2–Key4 are left alone until a note needs them: the patch dump shows the first knob of an
+  effect only, so their values are unknown to the bridge until it writes them. When the bridge
+  stops it closes every voice it has played.
+- Controllers learned for knobs both effects have (Level, Atk, Rel, LFO, Rate, Vib, Trm) set them
+  on whichever effect is in the preset. The interface lists the knobs of that effect.
+- **The knob ranges are assumed**, not read from KeyPoly: Key1–Key4 0–1000, Wave 0–3 (as KeySynth's
+  Wave1), LFO 0–100 with Off in the middle (as KeySynth's), all others 0–100. They are in
+  `zoom_sysex.py` (`POLY_KNOBS`); compare them with KeyPoly's `manifest.json` before you play it.
 
 ## On a Raspberry Pi, without screen (in progress)
 
@@ -291,11 +322,12 @@ power for a bus-powered keyboard, and the tests after pulling the plug.
 - **Parameters that were not learned** are sent with the range you enter. Until the pedal has
   confirmed such a parameter once, it gets one message at a time; after five unconfirmed
   messages the bridge stops sending to it and the interface says so.
-- **The keyboard synth writes the KeySynth's knobs only.** Notes and bends are built with the
-  parameter fixed to the effect's Key knob (0–1000); a controller writes the knob it was
-  assigned to, within that knob's own range. All of it passes the allowlist only while the
-  pedal's own patch dump shows the effect in that slot. An expression assignment that points
-  at the Key knob, or whose range is wider than the knob it points at, is not sent.
+- **The keyboard synth writes the synth effect's knobs only.** Notes and bends are built with the
+  parameter fixed to one of the four Key knobs (parameters 2–5, 0–1000); a controller writes the
+  knob it was assigned to, within that knob's own range. All of it passes the allowlist only
+  while the pedal's own patch dump shows KeySynth or KeyPoly in that slot, and only with the
+  knobs of the one it shows. An expression assignment that points at a Key knob, or whose range
+  is wider than the knob it points at, is not sent.
 - **Not tested:** what the pedal does with an effect or parameter number that does not exist
   in the preset. The reference documentation mentions a related system command whose invalid
   values freeze the pedal, so the firmware does not validate everything.

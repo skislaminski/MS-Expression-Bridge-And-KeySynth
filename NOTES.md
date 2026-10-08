@@ -372,3 +372,51 @@ soll mit jedem Keyboard gehen. Der Effekt bekommt dafür eine neue Reglerbelegun
   mit der am 08.10. um 03:35 installierten und zurückgelesenen Datei (sha256 `ab92affa…`). Code weiter bytegleich
   mit 0.21. Gegenprobe aus `keysynth/source/`: alle drei Dateien bytegleich.
 - README des Synths nachgezogen, `github-upload/` neu gefüllt. Am Code der Bridge nichts geändert.
+
+## Stimmenverteilung für KeyPoly, 2026-10-08 (ohne Pedal, ohne den Effekt)
+
+Anlass: KeyPoly, ein vierstimmiger Synth-Effekt, entsteht an anderer Stelle. Laut seiner Beschreibung
+liegen Key1–Key4 auf Param 2–5 im Format von KeySynth, dahinter acht geteilte Regler (Level, Wave, Cutoff,
+Reso, Atk, Rel, LFO, Rate); pro Stimme hält der Effekt Phase, Hüllkurve, Tonhöhe und die zuletzt verlangte
+Tonhöhe für die Bend-Glättung. Offen war die Bridge: Sie konnte die vier Stimmen nicht verteilen.
+
+- **Ein Codepfad für beide Effekte.** KeySynth ist jetzt der Sonderfall „eine Stimme“: `Session.voices`
+  hält pro Key-Regler eine `Voice` (zugewiesene Note, gesendeter Key-Wert, offene Acks). Alle 66 bisherigen
+  Synth- und SysEx-Tests laufen unverändert durch.
+- **Zuteilung (`Session._assign`):** Gespielt werden die letzten vier Noten, gehaltene Tasten vor solchen,
+  die nur das Sustain-Pedal hält (`Keys.notes`). Eine klingende Note behält ihre Stimme; beim Loslassen
+  wird nur ihre Stimme geschlossen, die anderen werden gar nicht beschrieben. Eine neue Note nimmt die
+  freie Stimme, die zuletzt dieselbe Note gespielt hat (so liegt ein Ton nie auf zwei Stimmen, siehe
+  „phasengleich, 1,97 ×“ in der Beschreibung), sonst die am längsten freie. Die fünfte Note nimmt die
+  Stimme der ältesten und wechselt ohne Gate-off dorthin; wird die neuere losgelassen, kommt die ältere
+  zurück, wie bei KeySynth.
+- **Akkorde gehen sofort raus**, eine Nachricht pro Note, kein Abstand. Jede Stimme hat ihre eigene
+  Wiederholung bei fehlendem Ack (wie bisher 60 ms, bis zu drei Mal).
+- **Pitch-Wheel:** jede klingende Stimme in Schritten von höchstens 9 Klicks, die Stimmen abwechselnd im
+  Mindestabstand. Ein voller Bend eines Vierklangs dauert damit etwa viermal so lang wie auf KeySynth.
+- **Key2–Key4 unbekannt:** Der Patch-Dump zeigt nur den ersten Regler eines Effekts. Ein Versuch, die
+  übrigen Regler als je 12 Bit zu lesen, passte beim echten Dump vom 07.10. nicht (KeySynth: 0, 38, 1, 2,
+  36, 1024, …). Die Bridge fasst Key2–Key4 deshalb erst an, wenn eine Note sie braucht; da freie Stimmen
+  der Reihe nach drankommen, ist nach vier Noten jede einmal beschrieben. Beim Beenden schließt sie jede
+  Stimme, die sie gespielt hat.
+- **Config:** `synth.poly_effect_id` (Standard `null`). `effect_id` darf jetzt leer sein, wenn
+  `poly_effect_id` gesetzt ist; beide verschieden. Gespielt wird der erste der beiden Effekte in der Kette.
+  Gleiche Regeln in `config_schema.py` für den Pi.
+- **Controller:** `controls.json` speichert weiter Name → CC. Namen, die beide Effekte haben (Level, Atk,
+  Rel, LFO, Rate, Vib, Trm), wirken auf den Effekt im Preset; Cutoff, Reso, Wave nur auf KeyPoly, Wave1,
+  Wave2, Pitch, Dtune, Mix, Glide nur auf KeySynth. Die Oberfläche zeigt die Regler des Effekts im Preset,
+  ohne Effekt alle; die Statuszeile nennt den Effekt und bei KeyPoly die Note jeder Stimme.
+- **Annahmen, am Manifest von KeyPoly zu prüfen** (`zoom_sysex.POLY_KNOBS`): Key1–Key4 0–1000, Wave 0–3
+  (Saw, Sqr, Tri, Sine wie Wave1), LFO 0–100 mit Off = 50 (wie KeySynth 0.21, sonst stimmen „Vib“/„Trm“
+  nicht), Level, Cutoff, Reso, Atk, Rel, Rate 0–100. Ein zu hoher Höchstwert würde Werte außerhalb des
+  Reglers senden; KeySynth schaltet dann stumm (Guard im Kernel), was KeyPoly tut, ist offen.
+- 22 neue Tests in `tests/test_poly.py`, 4 neue Fälle in `tests/test_export.py`. Der LED-Test
+  `test_an_led_that_may_not_be_written_is_left_alone` schlägt in der Cloud-Umgebung schon vor der Änderung
+  fehl (läuft als root, `chmod 0o444` sperrt dort nicht).
+- **Am Pedal noch zu prüfen:**
+  - Vier Key-Writes pro Akkord, fast gleichzeitig: Bestätigt das Pedal alle? Bisher bekannt ist nur, dass
+    es von zwei Nachrichten an *denselben* Parameter im Abstand von 1 ms nur die zweite bestätigt. Gilt das
+    auch für verschiedene Parameter, meldet die Bridge bei Akkorden „does not confirm notes“ und
+    wiederholt die Noten; dann brauchen die Writes eines Akkords einen kleinen Abstand.
+  - Zeit Taste → Ack pro Stimme (die Konsole nennt jetzt `Key1` … `Key4`).
+  - Last mit vier Dreiecken, Bend eines Vierklangs, Stimmenklau bei gehaltenem Sustain-Pedal.

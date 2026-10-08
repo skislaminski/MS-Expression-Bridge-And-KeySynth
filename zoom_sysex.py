@@ -63,10 +63,12 @@ RESERVED_SLOTS = (0x5F, 0x64)
 MIN_PARAM = 2
 
 
-# KeySynth, a DIY effect played from a MIDI keyboard: its first knob "Key" is gate and pitch in
-# one number, so a note and its pitch bend can never arrive apart.
+# KeySynth and KeyPoly, DIY effects played from a MIDI keyboard: a "Key" knob is gate and pitch in
+# one number, so a note and its pitch bend can never arrive apart. KeySynth has one voice and one
+# Key knob; KeyPoly has four voices, Key1–Key4, each in the same format.
 # Measured on the MS-60B+: the pedal has 6 effect slots.
-KEY_PARAM = 2
+KEY_PARAM = 2           # the first Key knob; KeyPoly's Key2–Key4 follow it
+MAX_VOICES = 4
 KEY_MAX = 1000          # 0 = gate off, n = (n - 1) x 10 cents above KEY_BASE_NOTE
 KEY_BASE_NOTE = 12      # the MIDI note of Key 1 (C0)
 KEY_STEPS = 10          # Key clicks per semitone
@@ -78,6 +80,12 @@ KEY_BEND_STEP = 9       # the effect takes a larger move of the Key knob for a n
 SYNTH_KNOBS = (("Key", KEY_MAX), ("Level", 100), ("Wave1", 3), ("Wave2", 4), ("Pitch", 48),
                ("Dtune", 100), ("Mix", 100), ("Glide", 100), ("Atk", 100), ("Rel", 100),
                ("LFO", 100), ("Rate", 100))
+# The knobs of KeyPoly, from its description: Key1–Key4 in KeySynth's Key format, then eight knobs
+# shared by the voices. The highest values are assumed to be KeySynth's (Wave as Wave1, Saw … Sine;
+# LFO as Vib50 … Off … Trm50); compare them with KeyPoly's manifest.json before playing it.
+POLY_KNOBS = tuple((f"Key{voice + 1}", KEY_MAX) for voice in range(MAX_VOICES)) + (
+    ("Level", 100), ("Wave", 3), ("Cutoff", 100), ("Reso", 100), ("Atk", 100), ("Rel", 100),
+    ("LFO", 100), ("Rate", 100))
 MAX_SLOTS = 6
 
 
@@ -151,14 +159,17 @@ def build_set_param(device_id: int, slot: int, param: int, value: int) -> bytes:
     return _zoom(device_id, 0x64, 0x20, 0x00, slot, param, lsb, msb, 0x00, 0x00, 0x00)
 
 
-def build_set_key(device_id: int, slot: int, key: int) -> bytes:
-    """The Key knob of the KeySynth effect in the given slot, and nothing else: the same message
-    as build_set_param with the parameter fixed, so it can never reach on/off or the effect type."""
+def build_set_key(device_id: int, slot: int, key: int, voice: int = 0) -> bytes:
+    """A Key knob of the synth effect in the given slot, and nothing else: voice 0 is KeySynth's
+    Key or KeyPoly's Key1, voices 1–3 are Key2–Key4. The same message as build_set_param with the
+    parameter fixed to one of those four, so it can never reach on/off or the effect type."""
     if not 0 <= slot < MAX_SLOTS:
         raise ValueError(f"slot {slot} is not one of the {MAX_SLOTS} effect slots")
+    if not 0 <= voice < MAX_VOICES:
+        raise ValueError(f"voice {voice} is not one of the {MAX_VOICES} Key knobs")
     if not 0 <= key <= KEY_MAX:
         raise ValueError(f"key {key} is outside 0–{KEY_MAX}")
-    return build_set_param(device_id, slot, KEY_PARAM, key)
+    return build_set_param(device_id, slot, KEY_PARAM + voice, key)
 
 
 def key_for(note: int, bend: float = 0.0) -> int:
@@ -176,17 +187,48 @@ def key_pitch(key: int) -> tuple[int, int]:
     return KEY_BASE_NOTE + note, (clicks - note * KEY_STEPS) * (100 // KEY_STEPS)
 
 
-def synth_knob(name: str) -> tuple[int, int]:
-    """Parameter number and highest value of a KeySynth knob."""
-    for index, (knob, top) in enumerate(SYNTH_KNOBS):
+# What a controller of the keyboard can be assigned to, as name → (knob, value at rest, value at
+# full travel): every knob but the Key knobs over its whole range, and the two halves of the LFO
+# knob on their own. The LFO knob is depth and kind in one (Vib50 … Vib1, Off, Trm1 … Trm50), so
+# a wheel on "LFO" would have Off in the middle of its travel. "Vib" and "Trm" run from Off to the
+# deepest vibrato or tremolo instead: at rest the LFO is off, as with the mod wheel of a
+# hardware synth.
+LFO_OFF = 50
+
+
+class SynthEffect:
+    """A synth effect the keyboard plays: its Key knobs come first, one per voice, and a
+    controller of the keyboard can be assigned to any of the others (`controls`)."""
+
+    def __init__(self, name: str, knobs: tuple, voices: int):
+        self.name, self.knobs, self.voices = name, knobs, voices
+        self.controls = {knob: (knob, 0, top) for knob, top in knobs[voices:]}
+        if "LFO" in self.controls:
+            self.controls.update({"Vib": ("LFO", LFO_OFF, 0), "Trm": ("LFO", LFO_OFF, 2 * LFO_OFF)})
+
+    def __repr__(self) -> str:
+        return self.name
+
+
+KEYSYNTH = SynthEffect("KeySynth", SYNTH_KNOBS, 1)
+KEYPOLY = SynthEffect("KeyPoly", POLY_KNOBS, MAX_VOICES)
+# Every name a controller can be assigned to, on one of the two effects. A name both have (Level,
+# Atk, Rel, LFO, Rate, Vib, Trm) sets that knob on whichever of them is in the preset.
+ALL_CONTROLS = dict(KEYSYNTH.controls, **{name: control for name, control in KEYPOLY.controls.items()
+                                           if name not in KEYSYNTH.controls})
+
+
+def synth_knob(name: str, effect: SynthEffect = KEYSYNTH) -> tuple[int, int]:
+    """Parameter number and highest value of a knob of the synth effect."""
+    for index, (knob, top) in enumerate(effect.knobs):
         if knob == name:
             return MIN_PARAM + index, top
-    raise ValueError(f"KeySynth has no knob called {name}")
+    raise ValueError(f"{effect.name} has no knob called {name}")
 
 
-def synth_targets(slot: int) -> tuple:
-    """The allowlist entries for the KeySynth in that slot: every knob with its own range."""
-    return tuple(ParamTarget(slot, MIN_PARAM + index, 0, top) for index, (_, top) in enumerate(SYNTH_KNOBS))
+def synth_targets(slot: int, effect: SynthEffect = KEYSYNTH) -> tuple:
+    """The allowlist entries for the synth effect in that slot: every knob with its own range."""
+    return tuple(ParamTarget(slot, MIN_PARAM + index, 0, top) for index, (_, top) in enumerate(effect.knobs))
 
 
 def cc_to_knob(value: int, top: int) -> int:
@@ -194,20 +236,9 @@ def cc_to_knob(value: int, top: int) -> int:
     return min(top, value * (top + 1) // 128)
 
 
-# What a controller of the keyboard can be assigned to, as name → (knob, value at rest, value at
-# full travel): every knob but Key over its whole range, and the two halves of the LFO knob on
-# their own. The LFO knob is depth and kind in one (Vib50 … Vib1, Off, Trm1 … Trm50), so a
-# wheel on "LFO" would have Off in the middle of its travel. "Vib" and "Trm" run from Off to the
-# deepest vibrato or tremolo instead: at rest the LFO is off, as with the mod wheel of a
-# hardware synth.
-LFO_OFF = 50
-SYNTH_CONTROLS = {name: (name, 0, top) for name, top in SYNTH_KNOBS[1:]}
-SYNTH_CONTROLS.update({"Vib": ("LFO", LFO_OFF, 0), "Trm": ("LFO", LFO_OFF, 2 * LFO_OFF)})
-
-
-def control_value(name: str, value: int) -> int:
-    """The knob value for a controller value 0–127 on one of SYNTH_CONTROLS."""
-    _, rest, full = SYNTH_CONTROLS[name]
+def control_value(name: str, value: int, effect: SynthEffect = KEYSYNTH) -> int:
+    """The knob value for a controller value 0–127 on one of the effect's controls."""
+    _, rest, full = effect.controls[name]
     steps = cc_to_knob(value, abs(full - rest))
     return rest + steps if full >= rest else rest - steps
 
