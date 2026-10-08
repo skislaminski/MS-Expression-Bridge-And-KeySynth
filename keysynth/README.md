@@ -9,7 +9,7 @@ MS pedals (see [Credits](#credits-and-license)).
 
 | File | What it is |
 |---|---|
-| `ms-60b-plus/KEYSYNTH.ZD2` | The effect, version 0.21, ready to install on an **MS-60B+**. The only file here that has been on a pedal |
+| `ms-60b-plus/KEYSYNTH.ZD2` | The effect, version 1.10, ready to install on an **MS-60B+**. The only file here that has been on a pedal |
 | `ms-50g-plus_ms-70cdr-plus/KEYSYNTH.ZD2` | The same effect with the header for the **MS-50G+** and **MS-70CDR+**. **Untested**, see [MS-50G+ and MS-70CDR+](#ms-50g-and-ms-70cdr-untested) |
 | `KEYSYNTH.ZIC` in both folders | Its icon; the installer wants it next to the effect |
 | `source/` | Everything needed to rebuild it: kernel, tables, desktop tests, tools |
@@ -19,8 +19,8 @@ the one for your pedal and do not rename it.
 
 | File | SHA-256 |
 |---|---|
-| `ms-60b-plus/KEYSYNTH.ZD2` | `c54edc5a5ac5d1f2f5d6ae5867c2ac3bb58820e876284f5e11a555687667243d` |
-| `ms-50g-plus_ms-70cdr-plus/KEYSYNTH.ZD2` | `eddc43cf90f55c5d7a3abe86c0c948b03be2b1d214c7bb1b1bf331c59d2527dd` |
+| `ms-60b-plus/KEYSYNTH.ZD2` | `ab92affa1283c0f3c0487ecfa055ee553d5a6b8d948afa169e9375948241ebfb` |
+| `ms-50g-plus_ms-70cdr-plus/KEYSYNTH.ZD2` | `2d654b341f72186a69b547ca0d4476a0ac480fc967cd5e229fc6b74dc6805197` |
 
 > **Read this first.** A custom effect is code that runs inside your pedal. A faulty effect in a
 > *saved* patch, or a file transfer that is interrupted, **can leave the pedal unable to start,
@@ -57,9 +57,12 @@ How the pitch moves: a note after a gap starts on pitch. A move of the Key knob 
 semitone counts as a bend and is smoothed over about 20 ms, so the 10-cent steps do not show.
 A larger move while the gate is open is a tied note; with Glide on, the pitch slides there.
 
-On the MS-60B+ the effect appears in the category **Pitch shift** as “KEY SYNTH” (on the MS-50G+
-and MS-70CDR+ its id puts it under **SFX**). It declares a DSP load of 52 (the pedal adds up the
-declared loads of a patch and refuses effects beyond its budget).
+On the MS-60B+ the effect appears in the category **Pitch shift** (on the MS-50G+ and MS-70CDR+
+its id puts it under **SFX**). Its picture is a light stompbox with four knobs, “KEY SYNTH”, a
+keyboard, “SLAMINSKI” at the bottom and the version at the top right, so the pedal shows which
+version is installed (once something in the patch has been edited, the pedal writes “Edited”
+over that corner). It declares a DSP load of 52 (the pedal adds up the declared loads of a
+patch and refuses effects beyond its budget).
 
 ## Installing it
 
@@ -116,8 +119,9 @@ available. What speaks for it, all of it read from other people's work and not m
   MS-50G+ with firmware 1.40.
 
 What nobody has checked: whether KeySynth loads and sounds right there, whether its declared load
-of 52 is honest on those pedals, how the long value lists display, and what happens when a patch
-with it is saved. If you try it anyway:
+of 52 is honest on those pedals, how the long value lists display, whether the knobs in the
+picture sit where those pedals draw theirs, and what happens when a patch with it is saved. If
+you try it anyway:
 
 - Follow stomphacks' order: `writetest` before `install`, scroll over the effect in the pedal's
   browser before you add it to a patch, and keep it in an unsaved patch.
@@ -146,6 +150,9 @@ MS-80IR+ and MS-200D+ nothing is prepared.
 - Version 0.21: played from a keyboard for well over an hour with pitch wheel, mod wheel
   on the LFO depth and knobs assigned to several parameters; the long value lists (Pitch with
   49 entries, LFO with 101) display correctly; knob settings survive chain edits.
+- Version 1.10 is the code of 0.21, byte for byte, with a new picture: installed and read back
+  identical. The picture was looked at on the pedal in the build before, which differed only in
+  the version number drawn in it.
 - While you operate the pedal itself (turn a knob, browse effects), it answers parameter
   messages late for a moment, and a note can hang for a fraction of a second.
 
@@ -160,9 +167,15 @@ stomphacks/.venv/bin/python3 tools-local/gen_tables.py                       # l
 (cd stomphacks && ZOOM_TI_CGT=/path/to/ti-cgt-c6000_8.5.0.LTS \
     .venv/bin/python3 tools/zd2_make_effect.py ../effects/keysynth/manifest.json)
 sh host/run_tests.sh                                                          # desktop tests, needs clang
+stomphacks/.venv/bin/python3 tools-local/draw_icon.py effects/keysynth/icon   # the picture, with the version
+stomphacks/.venv/bin/python3 tools-local/set_icon.py \
+    effects/keysynth/build/KEYSYNTH.ZD2 effects/keysynth/icon                 # put it into the build
 stomphacks/.venv/bin/python3 tools-local/adapt_ms60b.py \
     effects/keysynth/build/KEYSYNTH.ZD2 /your/backup/files/B_OCTAVE.ZD2       # MS-60B+ header
 ```
+
+Built this way from `source/`, both effect files and the icon file came out byte-identical with
+the ones published here.
 
 - `effects/keysynth/keysynth.c` is the kernel: it runs once per block of 16 samples, without
   function calls, division, stack or static data, as stomphacks requires. Read stomphacks'
@@ -171,6 +184,11 @@ stomphacks/.venv/bin/python3 tools-local/adapt_ms60b.py \
 - `host/` runs the same kernel source on the desktop: about 6.5 million checks (silence when
   uninitialised, random knob changes, every Key value, clicks, bypass, spectra, glide and bend)
   and a set of WAV files to listen to in `host/out/`.
+- `tools-local/draw_icon.py` draws the picture in its two sizes, every pixel of it, and takes the
+  version from `manifest.json`. The pedal draws the four knobs of the current page into the
+  picture itself, always at the same places, so LED and knobs sit where the MS-60B+'s own
+  effects have theirs. `tools-local/set_icon.py` puts the picture into the icon file and into the
+  effect file in place of the plain one stomphacks' build draws, and changes nothing else.
 - `tools-local/adapt_ms60b.py` copies three header fields (18 bytes) from a stock effect of the
   same category **out of your own pedal backup** and recomputes the checksum. The result lands
   in `effects/keysynth/ms60b/`. No file from Zoom is part of this repository.
@@ -181,12 +199,17 @@ stomphacks/.venv/bin/python3 tools-local/adapt_ms60b.py \
 
 ## Versions
 
+- **1.10** The code of 0.21, unchanged. New picture: a stompbox with knobs where the pedal draws
+  its own, and the version in the corner (“V1.1”, to match release V1.1 of this repository, which
+  added the files for the MS-50G+ and MS-70CDR+). 0.22, 0.23 and 1.00 were tries at the picture
+  and its number and were not published.
 - **0.21** LFO knob with 50 steps each way; vibrato up to ±100 cents.
 - **0.20** Key knob 0–1000 (10-cent steps, so the pitch wheel fits in), Glide, the second
   oscillator's pitch shown as −24 … +24, LFO kind and depth in one knob.
 - **0.10** First version: Key 0–128 (one step per note).
 
-The bridge in this repository speaks the Key format of 0.20 and later, and the LFO scale of 0.21.
+The bridge in this repository speaks the Key format of 0.20 and later, and the LFO scale of 0.21
+and later.
 
 ## Credits and license
 

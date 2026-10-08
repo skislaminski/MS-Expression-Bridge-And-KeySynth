@@ -343,3 +343,32 @@ soll mit jedem Keyboard gehen. Der Effekt bekommt dafür eine neue Reglerbelegun
   alle drei haben 6 Slots. Nur am MS-60B+ belegt ist der Leser für den Patch-Dump (`parse_patch_dump`); findet er
   den Synth nicht, meldet die Bridge das und ignoriert das Keyboard. Die Meldungen nennen weiter das MS-60B+.
 - README und Dateiliste nachgezogen.
+
+## KeySynth 1.00 im Veröffentlichungsordner, 2026-10-08 03:1x Uhr (Nutzer: „Passt mache ready“)
+
+- `keysynth/ms-60b-plus/` und `keysynth/ms-50g-plus_ms-70cdr-plus/` enthalten jetzt **Version 1.00**: der Code von
+  0.21, bytegleich, mit neuem Bild (heller Bodentreter, LED und vier Regler an den Stellen der Stock-Effekte,
+  „KEY SYNTH“, Tastatur mit Fußschalter, unten „SLAMINSKI“, oben rechts „V1.0“ aus dem Manifest).
+  `ms-60b-plus/KEYSYNTH.ZD2` ist bytegleich mit der am 08.10. um 03:07 installierten und zurückgelesenen Datei
+  (sha256 `77642922…`). 0.22 und 0.23 waren Bildversuche am Pedal und sind nicht veröffentlicht.
+- Quellen ergänzt: `source/effects/keysynth/icon/` (beide Bilder), `source/tools-local/draw_icon.py` und
+  `set_icon.py`, Versionsnummer im Manifest.
+- **Gegenprobe:** aus `keysynth/source/` in einer Kopie neu gebaut (zeichnen, bauen, Bild einsetzen, Kopf
+  angleichen): beide Effektdateien und die Icon-Datei bytegleich mit den veröffentlichten. Desktop-Tests:
+  6 486 010 Prüfungen bestanden.
+- README des Synths nachgezogen (Version, Prüfsummen, Bild, Bauanleitung, Versionsliste).
+- **Am Code der Bridge ist nichts geändert**, die Tests liefen deshalb nicht neu. Mit 1.00 auf dem Pedal ist die
+  Bridge noch nicht gelaufen (der Code des Effekts ist derselbe wie bei 0.21).
+- `github-upload/` neu gefüllt.
+- **Nutzer am Pedal (08.10., ca. 03:10):** „Passt.“ Das Bild von 1.00 stimmt, „V1.0“ ist lesbar. Sobald etwas
+  editiert wurde, schreibt das Pedal „Edited“ über die Ecke oben rechts und verdeckt die Versionsnummer; laut
+  Nutzer „halb so wild“, bleibt so. README entsprechend gekürzt und ergänzt, `github-upload/` erneut gefüllt.
+
+## KeySynth 1.10 statt 1.00, 2026-10-08 03:3x Uhr (Entscheidung des Nutzers)
+
+- Der Synth heißt jetzt **1.10** (im Bild „V1.1“), passend zum Commit „Update V1.1 Beta“, mit dem die Dateien für
+  MS-50G+ und MS-70CDR+ auf GitHub kamen. 1.00 war nur auf dem Pedal des Nutzers und wurde nicht committet.
+- Beide Pedal-Ordner, Manifest und Bilder unter `keysynth/` sind 1.10; `ms-60b-plus/KEYSYNTH.ZD2` ist bytegleich
+  mit der am 08.10. um 03:35 installierten und zurückgelesenen Datei (sha256 `ab92affa…`). Code weiter bytegleich
+  mit 0.21. Gegenprobe aus `keysynth/source/`: alle drei Dateien bytegleich.
+- README des Synths nachgezogen, `github-upload/` neu gefüllt. Am Code der Bridge nichts geändert.

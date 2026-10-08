@@ -2,7 +2,7 @@
   "name": "KeySynth",
   "filename": "KEYSYNTH",
   "id": "07000f61",
-  "version": "0.21",
+  "version": "1.10",
   "display": "KEY SYNTH",
   "badge": "KS",
   "description": "Two-oscillator mono synth voice played over MIDI: the Key knob is gate and pitch (0 = off, n = 10-cent steps above C0, note and pitch bend come from the keyboard controller). The input passes through unchanged, the synth is added.",
